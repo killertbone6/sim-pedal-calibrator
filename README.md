@@ -1,33 +1,35 @@
 # Sim Pedal Calibrator
 
-A small Python app that finds your pedal controller on a COM port, shows what
-each pedal is actually reading, and lets you set the min and max point of each
-one. The calibration is stored on the device, so it survives unplugging.
+A small app that finds your pedal controller on a COM port, shows what each
+pedal is actually reading, and lets you set the min and max point of each one.
+The calibration is stored on the device, so it survives unplugging.
 
 ![screenshot](docs/screenshot.png)
 
-There is a **built-in simulator**, so you can download this and click around
-before you have any hardware wired up.
+## Download (Windows)
 
-## What's in here
+**[Get PedalCalibrator.exe from the Releases page →](../../releases/latest)**
 
-| Path | What it is |
-|---|---|
-| `pedalcal/` | The desktop app (Python + Tkinter) |
-| `firmware/pedal_firmware/` | Arduino sketch for the pedal controller |
-| `docs/PROTOCOL.md` | The serial protocol, if you want to talk to the device yourself |
-| `tests/` | Protocol tests plus a headless GUI smoke test |
+One file. Nothing to install, no Python needed. Download it, double-click it,
+done.
 
-## Try it without hardware
+> Windows may show a blue **"Windows protected your PC"** box the first time.
+> Click **More info → Run anyway**. That appears for any program that hasn't
+> been code-signed, which costs a few hundred dollars a year — most small
+> open-source tools skip it.
 
-You need **Python 3.10 or newer** installed. If you don't have it: get it from
-[python.org/downloads](https://www.python.org/downloads/) and **tick "Add
-python.exe to PATH"** on the first installer screen. That box matters — without
-it Windows won't find Python later.
+There's a **built-in simulator** in the port dropdown, so you can click through
+the whole app before you've wired up any hardware.
 
-**Windows:** double-click **`Run Simulator.bat`**. It installs the one
-dependency the first time, then opens the app on three fake pedals.
-`Run Calibrator.bat` is the same thing but for real hardware.
+## Run from source
+
+For development, or on macOS and Linux. Needs **Python 3.10+** — get it from
+[python.org/downloads](https://www.python.org/downloads/) and tick
+**"Add python.exe to PATH"** on the first installer screen.
+
+**Windows:** double-click `Run Simulator.bat` (fake pedals) or
+`Run Calibrator.bat` (real hardware). They install the one dependency on first
+run.
 
 **macOS / Linux:** `./run.sh --simulate`
 
@@ -40,9 +42,14 @@ python -m pedalcal                 # real hardware
 python -m pedalcal --list          # just print the ports found
 ```
 
-There is no single "app file" to open — it's a Python program, so it's started
-by one of the launchers above. If you want a true double-clickable `.exe` with
-no Python at all, see [Building a Windows .exe](#building-a-windows-exe).
+## What's in here
+
+| Path | What it is |
+|---|---|
+| `pedalcal/` | The desktop app (Python + Tkinter) |
+| `firmware/pedal_firmware/` | Arduino sketch for the pedal controller |
+| `docs/PROTOCOL.md` | The serial protocol, if you want to talk to the device yourself |
+| `tests/` | Protocol tests plus a headless GUI smoke test |
 
 ## The hardware side
 
@@ -79,7 +86,7 @@ You do not need all three — unused pins just read noise, and you can drop
 
 ## Calibrating
 
-1. Plug the board in and run `python -m pedalcal`.
+1. Plug the board in and open the app.
 2. Pick the port. On Windows it's usually the one described as *Arduino* or
    *USB Serial Device*; on Linux `/dev/ttyACM0`; on macOS `/dev/cu.usbmodem…`.
 3. **Connect**. The status line should say `pedal firmware v1`.
@@ -101,23 +108,36 @@ The dark bar is the sensor's whole 0–1023 range. The blue block is the part
 you calibrated as usable, and the white line is where the pedal is right now.
 The progress bar underneath is what a game would actually see.
 
-## Building a Windows .exe
+## Publishing a release
+
+The included GitHub Actions workflow runs the tests, builds the Windows .exe,
+and attaches it to a release — all on GitHub's machines, so you don't need
+Python or Windows locally.
+
+```bash
+git tag v0.1.0
+git push --tags
+```
+
+Watch it under the **Actions** tab. A few minutes later the .exe is on your
+Releases page. Bump the version number for each new release.
+
+To build one yourself instead:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name PedalCalibrator run_app.py
+pyinstaller --onefile --windowed --name PedalCalibrator ^
+  --icon docs/icon.ico --add-data "pedalcal/icon.png;pedalcal" run_app.py
 ```
 
-The result is `dist/PedalCalibrator.exe`, a single file with no Python
-install needed. The included GitHub Actions workflow does this automatically
-and attaches the .exe to a release whenever you push a `v*` tag.
+(On macOS/Linux the `--add-data` separator is `:` instead of `;`.)
 
 ## Running the tests
 
 ```bash
 pip install pytest
-pytest tests -q                                    # protocol tests
-python tests/smoke_gui.py                          # drives the real GUI
+pytest tests -q              # protocol tests
+python tests/smoke_gui.py    # drives the real GUI against the simulator
 ```
 
 ## License

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import protocol as P
@@ -139,6 +141,10 @@ class CalibratorApp(ttk.Frame):
         self._build_log()
 
         self.refresh_ports(select=initial_port)
+        if initial_port is not None:
+            # --port / --simulate means "just start", so don't make the user
+            # click Connect as well.
+            self.after(200, self.toggle_connection)
         self.after(POLL_MS, self._tick)
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -306,11 +312,25 @@ class CalibratorApp(ttk.Frame):
         self.master.destroy()
 
 
+def _icon_path() -> Path:
+    """Where icon.png lives, both when run from source and inside a
+    PyInstaller one-file build (which unpacks to sys._MEIPASS)."""
+    bundled = getattr(sys, "_MEIPASS", None)
+    if bundled:
+        return Path(bundled) / "pedalcal" / "icon.png"
+    return Path(__file__).resolve().parent / "icon.png"
+
+
 def run(initial_port: str | None = None) -> None:
     root = tk.Tk()
     try:
         ttk.Style().theme_use("clam")
     except tk.TclError:
         pass
+    try:
+        root._icon = tk.PhotoImage(file=str(_icon_path()))  # keep a reference
+        root.iconphoto(True, root._icon)
+    except Exception:
+        pass  # cosmetic only, never worth failing over
     CalibratorApp(root, initial_port=initial_port)
     root.mainloop()

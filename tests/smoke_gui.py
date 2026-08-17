@@ -19,8 +19,7 @@ FAILURES = []
 def main() -> int:
     root = tk.Tk()
     root.geometry("620x680")
-    app = CalibratorApp(root, initial_port="SIMULATOR")
-    app.toggle_connection()
+    app = CalibratorApp(root, initial_port="SIMULATOR")  # auto-connects
 
     def check_streaming():
         if all(p.raw == 0 for p in app.panels):

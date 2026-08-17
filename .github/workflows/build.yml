@@ -5,7 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
-  workflow_dispatch:
+  workflow_dispatch:      # lets you build on demand from the Actions tab
 
 permissions:
   contents: write
@@ -30,13 +30,25 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --onefile --windowed --name PedalCalibrator run_app.py
+
+      # --onefile   : a single .exe, nothing to install
+      # --windowed  : no console window behind the app
+      # --add-data  : bundle the window icon (";" is the Windows separator)
+      - name: Build PedalCalibrator.exe
+        run: >
+          pyinstaller --onefile --windowed
+          --name PedalCalibrator
+          --icon docs/icon.ico
+          --add-data "pedalcal/icon.png;pedalcal"
+          run_app.py
+
       - uses: actions/upload-artifact@v4
         with:
           name: PedalCalibrator-windows
           path: dist/PedalCalibrator.exe
 
-      # Only on a version tag: publish a release with the .exe attached.
+      # On a version tag, publish a release with the .exe attached so people
+      # can download and run it without installing anything.
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
