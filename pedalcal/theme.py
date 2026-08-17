@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
-from pathlib import Path
-
-CONFIG_FILE = Path.home() / ".pedalcal.json"
 
 
 @dataclass(frozen=True)
@@ -75,11 +71,17 @@ PALETTES = {"dark": DARK, "light": LIGHT}
 #: Offered as swatches in the settings row.
 ACCENTS = [
     ("Cyan", "#22d3ee"),
+    ("Teal", "#2dd4bf"),
+    ("Green", "#4ade80"),
     ("Lime", "#a3e635"),
     ("Amber", "#fbbf24"),
     ("Orange", "#fb7c3c"),
+    ("Red", "#f87171"),
+    ("Pink", "#f472b6"),
     ("Magenta", "#e879f9"),
+    ("Violet", "#a78bfa"),
     ("Blue", "#60a5fa"),
+    ("Ice", "#cbd5e1"),
 ]
 
 
@@ -110,29 +112,37 @@ def mix(a: str, b: str, t: float) -> str:
     )
 
 
-# --------------------------------------------------------------------------
-# Persistence
-# --------------------------------------------------------------------------
+def palette_for(theme: str, accent_seed: str) -> Palette:
+    """Build a ready-to-use palette from saved settings."""
+    return PALETTES.get(theme, DARK).with_accent(accent_seed)
 
 
-def load_palette() -> Palette:
-    """The user's saved theme, or the dark default."""
-    try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-        base = PALETTES.get(str(data.get("theme", "dark")), DARK)
-        accent = str(data.get("accent", base.accent_seed))
-        if not (accent.startswith("#") and len(accent) == 7):
-            return base
-        return base.with_accent(accent)
-    except Exception:
-        return DARK
+def parse_colour(text: str) -> str | None:
+    """Accept the ways people actually write a colour, or return None.
 
+    Handles "#22d3ee", "22d3ee", "34,211,238", "34 211 238" and
+    "rgb(34, 211, 238)" - so a value copied out of a colour picker, CSS or a
+    paint program all work without the user having to convert anything.
+    """
+    raw = text.strip().lower()
+    if not raw:
+        return None
 
-def save_palette(palette: Palette) -> None:
-    try:
-        CONFIG_FILE.write_text(
-            json.dumps({"theme": palette.name, "accent": palette.accent_seed}, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass  # a read-only home directory must not break the app
+    if raw.startswith("rgb"):
+        raw = raw[3:].strip().lstrip("(").rstrip(")")
+
+    hexish = raw.lstrip("#")
+    if len(hexish) == 6 and all(c in "0123456789abcdef" for c in hexish):
+        return "#" + hexish
+    if len(hexish) == 3 and all(c in "0123456789abcdef" for c in hexish):
+        return "#" + "".join(c * 2 for c in hexish)
+
+    parts = [p for p in raw.replace(",", " ").split() if p]
+    if len(parts) == 3:
+        try:
+            values = [int(p) for p in parts]
+        except ValueError:
+            return None
+        if all(0 <= v <= 255 for v in values):
+            return "#%02x%02x%02x" % tuple(values)
+    return None

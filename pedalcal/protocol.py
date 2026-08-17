@@ -8,6 +8,7 @@ PC  ->  device
     ID?                     ask what is on the other end
     GET                     ask for the stored calibration
     SET <axis> <min> <max>  set calibration for one axis (applied immediately)
+    EN <axis> <0|1>         mark an axis as unused / in use
     SAVE                    write the current calibration to EEPROM
     LOAD                    re-read the calibration from EEPROM
     STREAM <0|1>            turn the live value stream off / on
@@ -16,6 +17,7 @@ device -> PC
     PEDALCAL <version>          identity banner (reply to ID?)
     D <raw0> <raw1> <raw2>      live raw ADC values, ~50 per second
     C <min0> <max0> ... <max2>  the current calibration (reply to GET / LOAD)
+    E <en0> <en1> <en2>         which axes are in use (reply to GET / LOAD)
     OK                          command accepted
     ERR <reason>                command rejected
 """
@@ -26,7 +28,7 @@ from dataclasses import dataclass
 
 BAUD = 115200
 FIRMWARE_ID = "PEDALCAL"
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 AXIS_NAMES = ("Throttle", "Brake", "Clutch")
 NUM_AXES = len(AXIS_NAMES)
@@ -71,6 +73,23 @@ class Calibration:
 
 
 @dataclass(frozen=True)
+class Enabled:
+    """Which pedals are actually wired up.
+
+    An analog pin with nothing on it doesn't read zero - it floats, and the
+    ADC's sample-and-hold leaks the previous channel's voltage into it, so an
+    unused clutch input mirrors the brake. Telling the firmware an axis is
+    unused makes it report a hard 0 instead of that ghost signal.
+    """
+
+    axes: tuple[bool, ...]
+
+    @staticmethod
+    def all_on() -> "Enabled":
+        return Enabled(tuple(True for _ in range(NUM_AXES)))
+
+
+@dataclass(frozen=True)
 class Ack:
     """``OK`` or ``ERR <reason>``."""
 
@@ -85,7 +104,7 @@ class Unknown:
     text: str
 
 
-Message = Ident | Data | Calibration | Ack | Unknown
+Message = Ident | Data | Calibration | Enabled | Ack | Unknown
 
 
 def parse_line(line: str) -> Message:
@@ -111,6 +130,9 @@ def parse_line(line: str) -> Message:
                 (numbers[i], numbers[i + 1]) for i in range(0, len(numbers), 2)
             )
             return Calibration(pairs)
+
+        if tag == "E" and len(parts) == NUM_AXES + 1:
+            return Enabled(tuple(p != "0" for p in parts[1:]))
 
         if tag == "OK":
             return Ack(True)
@@ -148,6 +170,12 @@ def cmd_set(axis: int, lo: int, hi: int) -> str:
     return f"SET {axis} {lo} {hi}"
 
 
+def cmd_enable(axis: int, on: bool) -> str:
+    if not 0 <= axis < NUM_AXES:
+        raise ValueError(f"axis must be 0..{NUM_AXES - 1}, got {axis}")
+    return f"EN {axis} {1 if on else 0}"
+
+
 def cmd_save() -> str:
     return "SAVE"
 
@@ -170,3 +198,18 @@ def scale(raw: int, lo: int, hi: int) -> float:
     if hi <= lo:
         return 0.0
     return max(0.0, min(1.0, (raw - lo) / (hi - lo)))
+
+
+def raw_to_pct(raw: int) -> int:
+    """Sensor reading as a percentage of its full travel.
+
+    The UI works entirely in percentages - "my brake rests at 12% and bottoms
+    out at 86%" is something you can reason about, where "raw 123 to 880"
+    is an implementation detail of a 10-bit ADC.
+    """
+    return round(max(0, min(ADC_MAX, raw)) / ADC_MAX * 100)
+
+
+def pct_to_raw(pct: float) -> int:
+    """The inverse of raw_to_pct, for talking to the firmware."""
+    return round(max(0.0, min(100.0, pct)) / 100 * ADC_MAX)

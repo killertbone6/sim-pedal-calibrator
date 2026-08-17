@@ -11,9 +11,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pedalcal", description="Sim racing pedal calibrator")
     parser.add_argument("--port", help="connect to this port on startup "
-                                       "(e.g. COM4, /dev/ttyACM0, SIMULATOR)")
-    parser.add_argument("--simulate", action="store_true",
-                        help="start on the built-in fake device, no hardware")
+                                       "(e.g. COM4, /dev/ttyACM0)")
     parser.add_argument("--list", action="store_true",
                         help="print the serial ports found and exit")
     args = parser.parse_args()
@@ -25,7 +23,7 @@ def main() -> None:
 
     from .gui import run  # imported late so --list works without a display
 
-    run(initial_port="SIMULATOR" if args.simulate else args.port)
+    run(initial_port=args.port)
 
 
 if __name__ == "__main__":

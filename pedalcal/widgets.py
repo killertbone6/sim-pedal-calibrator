@@ -358,6 +358,272 @@ class HudSelect(tk.Canvas, Themed):
         self.redraw()
 
 
+class Tabs(tk.Canvas, Themed):
+    """A segmented control: one rounded track, the active tab filled."""
+
+    def __init__(self, master, labels: list[str], palette: Palette,
+                 on_change=None, height: int = 36) -> None:
+        self.p = palette
+        self.labels = [t.upper() for t in labels]
+        self.on_change = on_change
+        self.active = 0
+        self._hover = -1
+        self._font = ui(9, "bold")
+        font = tkfont.Font(font=self._font)
+        seg = max(font.measure(spaced(t)) for t in self.labels) + 44
+        super().__init__(master, width=seg * len(self.labels), height=height,
+                         highlightthickness=0, bd=0, bg=palette.bg)
+        self.seg = seg
+        self.bind("<Button-1>", self._click)
+        self.bind("<Motion>", self._motion)
+        self.bind("<Leave>", lambda _e: self._set_hover(-1))
+        self.configure(cursor="hand2")
+        self.redraw()
+
+    def _index_at(self, x: float) -> int:
+        return max(0, min(len(self.labels) - 1, int(x // self.seg)))
+
+    def _motion(self, event) -> None:
+        self._set_hover(self._index_at(event.x))
+
+    def _set_hover(self, index: int) -> None:
+        if index != self._hover:
+            self._hover = index
+            self.redraw()
+
+    def _click(self, event) -> None:
+        self.select(self._index_at(event.x))
+
+    def select(self, index: int) -> None:
+        if index == self.active:
+            return
+        self.active = index
+        self.redraw()
+        if self.on_change is not None:
+            self.on_change(index)
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        self.configure(bg=p.bg)
+        h = int(self["height"])
+        w = self.seg * len(self.labels)
+        round_rect(self, 1, 1, w - 1, h - 1, 10, fill=p.surface_alt,
+                   outline=p.border, width=1)
+        for i, label in enumerate(self.labels):
+            x0 = i * self.seg
+            if i == self.active:
+                round_rect(self, x0 + 3, 3, x0 + self.seg - 3, h - 3, 8,
+                           fill=p.accent, width=0)
+                colour = p.on_accent
+            elif i == self._hover:
+                colour = p.accent
+            else:
+                colour = p.text_dim
+            self.create_text(x0 + self.seg / 2, h / 2 + 1, text=spaced(label),
+                             fill=colour, font=self._font)
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.redraw()
+
+
+class Toggle(tk.Canvas, Themed):
+    """An on/off switch with a label."""
+
+    TRACK_W = 38
+
+    def __init__(self, master, text: str, value: bool, command, palette: Palette,
+                 width: int | None = None, height: int = 26) -> None:
+        label = spaced(text.upper())
+        if width is None:
+            width = self.TRACK_W + 18 + tkfont.Font(font=ui(8, "bold")).measure(label)
+        super().__init__(master, width=width, height=height,
+                         highlightthickness=0, bd=0, bg=palette.surface)
+        self.p = palette
+        self.text = text.upper()
+        self.value = value
+        self.command = command
+        self._hover = False
+        self.bind("<Button-1>", lambda _e: self.toggle())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.configure(cursor="hand2")
+        self.redraw()
+
+    def _set_hover(self, hover: bool) -> None:
+        self._hover = hover
+        self.redraw()
+
+    def toggle(self) -> None:
+        self.set(not self.value)
+        if self.command is not None:
+            self.command(self.value)
+
+    def set(self, value: bool) -> None:
+        self.value = value
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        h = int(self["height"])
+        track_w, track_h = self.TRACK_W, 20
+        y0 = (h - track_h) / 2
+        fill = p.accent if self.value else p.surface_alt
+        edge = p.accent if self.value else (
+            mix(p.border, p.accent, 0.6) if self._hover else p.border)
+        round_rect(self, 1, y0, 1 + track_w, y0 + track_h, track_h / 2,
+                   fill=fill, outline=edge, width=1)
+        knob_r = track_h - 8
+        knob_x = 1 + track_w - knob_r - 4 if self.value else 5
+        self.create_oval(knob_x, y0 + 4, knob_x + knob_r, y0 + 4 + knob_r,
+                         fill=p.on_accent if self.value else p.text_dim, width=0)
+        self.create_text(track_w + 14, h / 2 + 1, anchor="w",
+                         text=spaced(self.text), font=ui(8, "bold"),
+                         fill=p.text if self.value else p.text_dim)
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.redraw()
+
+
+class Disclosure(tk.Canvas, Themed):
+    """A clickable "> CONSOLE" header that shows and hides a panel."""
+
+    def __init__(self, master, text: str, open_: bool, command,
+                 palette: Palette, height: int = 24) -> None:
+        super().__init__(master, height=height, highlightthickness=0, bd=0,
+                         bg=palette.bg)
+        self.p = palette
+        self.text = text.upper()
+        self.open = open_
+        self.command = command
+        self._hover = False
+        self.bind("<Button-1>", lambda _e: self.toggle())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Configure>", lambda _e: self.redraw())
+        self.configure(cursor="hand2")
+        self.redraw()
+
+    def _set_hover(self, hover: bool) -> None:
+        self._hover = hover
+        self.redraw()
+
+    def toggle(self) -> None:
+        self.open = not self.open
+        self.redraw()
+        if self.command is not None:
+            self.command(self.open)
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        self.configure(bg=p.bg)
+        h = int(self["height"])
+        colour = p.accent if self._hover else p.text_dim
+        cy = h / 2
+        if self.open:
+            self.create_polygon(4, cy - 2, 14, cy - 2, 9, cy + 4,
+                                fill=colour, width=0)
+        else:
+            self.create_polygon(6, cy - 5, 12, cy, 6, cy + 5,
+                                fill=colour, width=0)
+        self.create_text(22, cy + 1, anchor="w", text=spaced(self.text),
+                         font=ui(8, "bold"), fill=colour)
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.redraw()
+
+
+class ScrollArea(tk.Canvas, Themed):
+    """A vertically scrolling container with a slim drawn scrollbar.
+
+    The settings page is taller than a small laptop screen, and Tk will simply
+    refuse to map whatever doesn't fit rather than clipping it - so the bottom
+    cards would silently vanish. Put content in `self.body`.
+    """
+
+    BAR_W = 4
+
+    def __init__(self, master, palette: Palette) -> None:
+        super().__init__(master, highlightthickness=0, bd=0, bg=palette.bg)
+        self.p = palette
+        self.body = tk.Frame(self, bg=palette.bg)
+        self._win = self.create_window(0, 0, anchor="nw", window=self.body)
+        self._thumb = None
+        self.bind("<Configure>", self._on_resize)
+        self.body.bind("<Configure>", self._on_body)
+        # Wheel events only reach the widget under the pointer, and X11 sends
+        # them as buttons 4/5 while Windows and macOS send <MouseWheel>.
+        for target in (self, self.body):
+            target.bind("<Enter>", self._grab_wheel)
+            target.bind("<Leave>", self._release_wheel)
+
+    # -- geometry --------------------------------------------------------
+
+    def _on_resize(self, event) -> None:
+        self.itemconfig(self._win, width=event.width - self.BAR_W - 4)
+        self._sync()
+
+    def _on_body(self, _event=None) -> None:
+        self.configure(scrollregion=(0, 0, 0, self.body.winfo_reqheight()))
+        self._sync()
+
+    def _content_h(self) -> int:
+        return self.body.winfo_reqheight()
+
+    def _sync(self) -> None:
+        """Redraw the thumb, and snap back if content shrank below the view."""
+        view_h, content_h = self.winfo_height(), self._content_h()
+        if content_h <= view_h:
+            self.yview_moveto(0)
+        if self._thumb is not None:
+            self.delete(self._thumb)
+            self._thumb = None
+        if content_h <= view_h or view_h <= 1:
+            return
+        top, bottom = self.yview()
+        x = self.winfo_width() - self.BAR_W - 1
+        y0 = self.canvasy(0) + top * view_h
+        y1 = self.canvasy(0) + bottom * view_h
+        self._thumb = round_rect(self, x, y0 + 2, x + self.BAR_W, y1 - 2,
+                                 self.BAR_W / 2,
+                                 fill=mix(self.p.border, self.p.text_dim, 0.5),
+                                 width=0)
+
+    # -- wheel -----------------------------------------------------------
+
+    def _grab_wheel(self, _event=None) -> None:
+        self.bind_all("<MouseWheel>", self._wheel)
+        self.bind_all("<Button-4>", self._wheel)
+        self.bind_all("<Button-5>", self._wheel)
+
+    def _release_wheel(self, _event=None) -> None:
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.unbind_all(sequence)
+
+    def _wheel(self, event) -> None:
+        if self._content_h() <= self.winfo_height():
+            return
+        if getattr(event, "num", None) == 4:
+            step = -1
+        elif getattr(event, "num", None) == 5:
+            step = 1
+        else:
+            step = -1 if event.delta > 0 else 1
+        self.yview_scroll(step * 2, "units")
+        self._sync()
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.configure(bg=palette.bg)
+        self.body.configure(bg=palette.bg)
+        self._sync()
+
+
 class Card(tk.Canvas, Themed):
     """A rounded panel that hosts ordinary widgets inside `self.body`."""
 
@@ -450,16 +716,19 @@ class Meter(tk.Canvas, Themed):
         round_rect(self, 2, 2, w - 2, h - 2, 7, fill=p.surface_alt,
                    outline=mix(p.surface_alt, p.border, 0.8), width=1)
 
-        # 10% graticule, the detail that makes it read as an instrument
-        grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
-        for i in range(1, 10):
-            x = 2 + (w - 4) * i / 10
-            self.create_line(x, 5, x, h - 5, fill=grid)
-
         lo_x, hi_x = x_of(self.lo), x_of(self.hi)
         if hi_x > lo_x:
             round_rect(self, lo_x, 3, hi_x, h - 3, 5,
                        fill=mix(p.surface_alt, p.accent, 0.16), width=0)
+
+        # 10% graticule, the detail that makes it read as an instrument. Drawn
+        # after the range band so it stays visible inside it - with a default
+        # 0-100% calibration the band covers the whole track, and a graticule
+        # underneath would leave a featureless slab.
+        grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
+        for i in range(1, 10):
+            x = 2 + (w - 4) * i / 10
+            self.create_line(x, 5, x, h - 5, fill=grid)
 
         # fill up to the current reading, with a soft halo underneath
         fill_x = min(max(x_of(self.raw), lo_x), hi_x)

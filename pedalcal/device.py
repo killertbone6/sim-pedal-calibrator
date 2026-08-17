@@ -16,7 +16,6 @@ import serial
 from serial.tools import list_ports
 
 from . import protocol as P
-from .simulator import SIMULATOR_PORT, SimulatedSerial
 
 
 @dataclass(frozen=True)
@@ -57,29 +56,28 @@ def explain_port_error(exc: BaseException) -> str:
     return "The serial port could not be opened."
 
 
-def list_serial_ports(include_simulator: bool = True) -> list[PortInfo]:
-    """Every serial port the OS knows about, newest-looking first.
+def list_serial_ports() -> list[PortInfo]:
+    """Every serial port the OS knows about.
 
     On Windows these are COM1, COM3...; on Linux /dev/ttyACM0, /dev/ttyUSB0;
-    on macOS /dev/cu.usbmodem*. The simulator is appended so the app is always
-    usable without hardware.
+    on macOS /dev/cu.usbmodem*.
     """
-    ports = [
+    return [
         PortInfo(p.device, p.description or "unknown device")
         for p in sorted(list_ports.comports(), key=lambda p: p.device)
     ]
-    if include_simulator:
-        ports.append(PortInfo(SIMULATOR_PORT, "built-in simulator, no hardware"))
-    return ports
 
 
 class PedalDevice:
-    """An open connection to the pedal firmware (or to the simulator)."""
+    """An open connection to the pedal firmware."""
 
-    def __init__(self, port: str, baud: int = P.BAUD) -> None:
+    def __init__(self, port: str, baud: int = P.BAUD, transport=None) -> None:
+        """`transport` swaps in a stand-in for serial.Serial - the test suite
+        uses it to run the whole app against a fake board."""
         self.port = port
         self.baud = baud
-        self._ser: serial.Serial | SimulatedSerial | None = None
+        self._open_transport = transport or self._open_serial
+        self._ser = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._inbox: queue.Queue[P.Message] = queue.Queue()
@@ -90,16 +88,16 @@ class PedalDevice:
     def is_open(self) -> bool:
         return self._ser is not None and getattr(self._ser, "is_open", False)
 
-    def open(self) -> None:
-        if self.port == SIMULATOR_PORT:
-            self._ser = SimulatedSerial()
-        else:
-            self._ser = serial.Serial(self.port, self.baud, timeout=0.2)
-            # Most Arduino boards reset when the port opens; give the
-            # bootloader a moment before we expect sensible replies.
-            time.sleep(2.0)
-            self._ser.reset_input_buffer()
+    def _open_serial(self, port: str, baud: int):
+        ser = serial.Serial(port, baud, timeout=0.2)
+        # Most Arduino boards reset when the port opens; give the bootloader a
+        # moment before we expect sensible replies.
+        time.sleep(2.0)
+        ser.reset_input_buffer()
+        return ser
 
+    def open(self) -> None:
+        self._ser = self._open_transport(self.port, self.baud)
         self._stop.clear()
         self._thread = threading.Thread(target=self._read_loop, daemon=True)
         self._thread.start()

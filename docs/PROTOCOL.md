@@ -13,19 +13,21 @@ Raw values are 10-bit, so `0`–`1023`.
 | Command | Meaning | Reply |
 |---|---|---|
 | `ID?` | Who is there? | `PEDALCAL <version>` |
-| `GET` | Report the calibration in use | `C ...` |
+| `GET` | Report the calibration and axis state | `C ...` then `E ...` |
 | `SET <axis> <min> <max>` | Set one axis, applied immediately (not saved) | `OK` / `ERR ...` |
+| `EN <axis> <0\|1>` | Mark an axis as unused / in use | `OK` / `ERR ...` |
 | `SAVE` | Write current calibration to EEPROM | `OK` |
-| `LOAD` | Re-read calibration from EEPROM | `C ...` |
+| `LOAD` | Re-read calibration from EEPROM | `C ...` then `E ...` |
 | `STREAM <0\|1>` | Stop / start the live value stream | `OK` |
 
 ## Device → app
 
 | Message | Meaning |
 |---|---|
-| `PEDALCAL 1` | Identity banner, protocol version 1 |
+| `PEDALCAL 2` | Identity banner, protocol version 2 |
 | `D <raw0> <raw1> <raw2>` | Live raw readings, sent ~50×/second |
 | `C <min0> <max0> <min1> <max1> <min2> <max2>` | Current calibration |
+| `E <en0> <en1> <en2>` | Which axes are in use; a disabled axis streams a hard `0` |
 | `OK` | Command accepted |
 | `ERR <reason>` | Command rejected (`axis`, `range`, `unknown_command`) |
 
@@ -33,11 +35,14 @@ Raw values are 10-bit, so `0`–`1023`.
 
 ```
 >  ID?
-<  PEDALCAL 1
+<  PEDALCAL 2
 <  D 118 205 101
 <  D 340 205 101
 >  SET 0 120 880
 <  OK
+>  EN 2 0            (no clutch wired up)
+<  OK
+<  D 340 205 0       (clutch now reads a hard zero)
 >  SAVE
 <  OK
 ```
@@ -54,3 +59,16 @@ Anything at or below `min` reads 0%, anything at or above `max` reads 100%.
 That is the whole point of calibration: your sensor might only physically
 travel between raw 120 and raw 880, and you want that to map to a full
 0–100% pedal.
+
+## Unused inputs
+
+An analog pin with nothing connected does not read zero. The ADC shares one
+sample-and-hold capacitor across all channels, so the first conversion after
+switching pins still carries charge from the previous one - an unwired clutch
+input ends up echoing the brake next door. The firmware handles this two ways:
+
+* it discards one conversion per channel before sampling, letting the
+  capacitor settle, which fixes ghosting on long pedal leads too;
+* an axis turned off with `EN <axis> 0` is never read at all and reports `0`.
+
+That is why the app asks which pedals you actually wired up.

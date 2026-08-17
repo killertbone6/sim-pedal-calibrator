@@ -5,6 +5,10 @@
  * accepts min/max calibration from the desktop app. Calibration survives a
  * power cycle because it lives in EEPROM.
  *
+ * Only wired up two pedals? Switch the third off in the app's Settings tab.
+ * An unused analog pin floats and echoes its neighbour, so it looks like a
+ * pedal that moves on its own; disabling it makes the firmware report 0.
+ *
  * Works on any Arduino. On a board with native USB (Leonardo, Pro Micro,
  * Micro, Teensy) you can also uncomment USE_JOYSTICK below and the board
  * will appear to Windows as a game controller, so games see the calibrated
@@ -31,17 +35,17 @@ static const uint8_t PEDAL_PIN[NUM_AXES] = { A0, A1, A2 };
 // by Matthew Heironimus (Library Manager -> search "Joystick").
 // #define USE_JOYSTICK
 
-static const uint16_t PROTOCOL_VERSION = 1;
+static const uint16_t PROTOCOL_VERSION = 2;
 static const uint16_t ADC_MAX     = 1023;
 static const uint16_t STREAM_MS   = 20;     // 20 ms -> 50 frames/second
 static const uint8_t  OVERSAMPLE  = 4;      // averaged reads, cheap smoothing
-static const uint32_t EEPROM_MAGIC = 0x50444C31UL;  // "PDL1"
+static const uint32_t EEPROM_MAGIC = 0x50444C32UL;  // "PDL2"
 static const int      EEPROM_ADDR  = 0;
 
 // ---------------------------------------------------------------- state
 
 struct Cal { uint16_t lo; uint16_t hi; };
-struct Store { uint32_t magic; Cal axis[NUM_AXES]; };
+struct Store { uint32_t magic; Cal axis[NUM_AXES]; uint8_t enabled[NUM_AXES]; };
 
 static Store store;
 static bool     streaming = true;
@@ -64,6 +68,7 @@ static void useDefaults() {
   for (uint8_t i = 0; i < NUM_AXES; i++) {
     store.axis[i].lo = 0;
     store.axis[i].hi = ADC_MAX;
+    store.enabled[i] = 1;
   }
 }
 
@@ -74,6 +79,7 @@ static void loadFromEeprom() {
     if (store.axis[i].lo >= store.axis[i].hi || store.axis[i].hi > ADC_MAX) {
       sane = false;
     }
+    if (store.enabled[i] > 1) sane = false;
   }
   if (!sane) useDefaults();   // first boot, or corrupted contents
 }
@@ -84,6 +90,15 @@ static void saveToEeprom() {
 }
 
 static uint16_t readAxis(uint8_t i) {
+  if (!store.enabled[i]) return 0;   // nothing wired here: report a hard zero
+
+  // The ADC shares one sample-and-hold across every analog pin, so the first
+  // reading after switching channels still carries charge from the previous
+  // one. On a high-impedance input - a pedal on a long lead, or a pin with
+  // nothing attached - that shows up as one axis ghosting another. Throwing
+  // the first conversion away lets the capacitor settle on the new channel.
+  analogRead(PEDAL_PIN[i]);
+
   uint16_t total = 0;
   for (uint8_t s = 0; s < OVERSAMPLE; s++) total += analogRead(PEDAL_PIN[i]);
   return total / OVERSAMPLE;
@@ -94,6 +109,14 @@ static uint16_t applyCal(uint16_t raw, const Cal &c) {
   if (raw <= c.lo) return 0;
   if (raw >= c.hi) return ADC_MAX;
   return (uint32_t)(raw - c.lo) * ADC_MAX / (c.hi - c.lo);
+}
+
+static void sendEnabled() {
+  Serial.print(F("E"));
+  for (uint8_t i = 0; i < NUM_AXES; i++) {
+    Serial.print(' '); Serial.print(store.enabled[i] ? 1 : 0);
+  }
+  Serial.println();
 }
 
 static void sendCal() {
@@ -114,12 +137,25 @@ static void handleCommand(char *line) {
     Serial.print(F("PEDALCAL ")); Serial.println(PROTOCOL_VERSION);
     return;
   }
-  if (!strcmp(line, "GET")) { sendCal(); return; }
-  if (!strcmp(line, "LOAD")) { loadFromEeprom(); sendCal(); return; }
+  if (!strcmp(line, "GET")) { sendCal(); sendEnabled(); return; }
+  if (!strcmp(line, "LOAD")) { loadFromEeprom(); sendCal(); sendEnabled(); return; }
   if (!strcmp(line, "SAVE")) { saveToEeprom(); Serial.println(F("OK")); return; }
 
   if (!strncmp(line, "STREAM ", 7)) {
     streaming = (line[7] != '0');
+    Serial.println(F("OK"));
+    return;
+  }
+
+  if (!strncmp(line, "EN ", 3)) {
+    char *tok = strtok(line + 3, " ");
+    long axis = tok ? atol(tok) : -1;
+    tok = strtok(NULL, " ");
+    if (axis < 0 || axis >= NUM_AXES || tok == NULL) {
+      Serial.println(F("ERR axis"));
+      return;
+    }
+    store.enabled[axis] = (tok[0] != '0') ? 1 : 0;
     Serial.println(F("OK"));
     return;
   }
@@ -184,9 +220,9 @@ void loop() {
   for (uint8_t i = 0; i < NUM_AXES; i++) raw[i] = readAxis(i);
 
 #ifdef USE_JOYSTICK
-  joystick.setXAxis(applyCal(raw[0], store.axis[0]));
-  joystick.setYAxis(applyCal(raw[1], store.axis[1]));
-  joystick.setZAxis(applyCal(raw[2], store.axis[2]));
+  joystick.setXAxis(store.enabled[0] ? applyCal(raw[0], store.axis[0]) : 0);
+  joystick.setYAxis(store.enabled[1] ? applyCal(raw[1], store.axis[1]) : 0);
+  joystick.setZAxis(store.enabled[2] ? applyCal(raw[2], store.axis[2]) : 0);
   joystick.sendState();
 #endif
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# macOS / Linux launcher.  Usage:  ./run.sh            (real hardware)
-#                                  ./run.sh --simulate (no hardware)
+# macOS / Linux launcher.  Usage:  ./run.sh  [--port /dev/ttyACM0]
 set -e
 cd "$(dirname "$0")"
 

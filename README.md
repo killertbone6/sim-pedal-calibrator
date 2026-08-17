@@ -6,7 +6,8 @@ The calibration is stored on the device, so it survives unplugging.
 
 ![screenshot](docs/screenshot.png)
 
-Dark and light themes, six accent colours, and your choice is remembered.
+Calibration and settings tabs. Dark and light themes, twelve accent colours or
+any colour you type in, and your choices are remembered.
 
 ## Download (Windows)
 
@@ -20,29 +21,28 @@ done.
 > been code-signed, which costs a few hundred dollars a year — most small
 > open-source tools skip it.
 
-There's a **built-in simulator** in the port dropdown, so you can click through
-the whole app before you've wired up any hardware.
-
 ## Run from source
 
 For development, or on macOS and Linux. Needs **Python 3.10+** — get it from
 [python.org/downloads](https://www.python.org/downloads/) and tick
 **"Add python.exe to PATH"** on the first installer screen.
 
-**Windows:** double-click `Run Simulator.bat` (fake pedals) or
-`Run Calibrator.bat` (real hardware). They install the one dependency on first
-run.
+**Windows:** double-click `Run Calibrator.bat`. It installs the one dependency
+on first run.
 
-**macOS / Linux:** `./run.sh --simulate`
+**macOS / Linux:** `./run.sh`
 
 **Any platform, from a terminal:**
 
 ```bash
 pip install -r requirements.txt
-python -m pedalcal --simulate      # fake pedals
-python -m pedalcal                 # real hardware
+python -m pedalcal                 # open the app
 python -m pedalcal --list          # just print the ports found
 ```
+
+There is no single "app file" to open — it's a Python program, so it's started
+by one of the launchers above. If you want a true double-clickable `.exe` with
+no Python at all, see [Building a Windows .exe](#building-a-windows-exe).
 
 ## What's in here
 
@@ -51,7 +51,9 @@ python -m pedalcal --list          # just print the ports found
 | `pedalcal/` | The desktop app (Python + Tkinter) |
 | `firmware/pedal_firmware/` | Arduino sketch for the pedal controller |
 | `docs/PROTOCOL.md` | The serial protocol, if you want to talk to the device yourself |
-| `tests/` | Protocol tests plus a headless GUI smoke test |
+| `pedalcal/theme.py` | Palettes and colour parsing |
+| `pedalcal/widgets.py` | The canvas-drawn widget kit |
+| `tests/` | Protocol and settings tests, plus a headless GUI smoke test |
 
 ## The hardware side
 
@@ -73,8 +75,12 @@ sensor, or a load cell with an amplifier board.
    A2  ─────── sensor OUT                    →  Clutch
 ```
 
-You do not need all three — unused pins just read noise, and you can drop
-`NUM_AXES` in the sketch if you only have two pedals.
+**Only wiring up two pedals?** Leave the third pin unconnected and switch that
+pedal off under **Settings → Pedals connected**. This matters more than it
+sounds: an unused analog pin doesn't read zero, it echoes whatever its
+neighbour is doing, so an unwired clutch appears to follow the brake. Turning
+it off tells the firmware to skip the pin and report a flat zero, and hides the
+card so there's nothing confusing left on screen.
 
 ### Flashing the firmware
 
@@ -89,37 +95,54 @@ You do not need all three — unused pins just read noise, and you can drop
 ## Calibrating
 
 1. Plug the board in and open the app.
-2. Pick the port. On Windows it's usually the one described as *Arduino* or
-   *USB Serial Device*; on Linux `/dev/ttyACM0`; on macOS `/dev/cu.usbmodem…`.
-3. **Connect**. The status line should say `pedal firmware v1`.
-4. Click **Learn range**, press every pedal all the way down and let it back
-   up a couple of times, then click **Stop learning**. The min and max boxes
-   fill in from what it saw.
-   *Or* set them by hand: rest your foot off the pedal and click **Use
-   current** next to Min, press it fully and click **Use current** next to Max.
-5. Check the percentage readouts — resting should be 0%, fully pressed 100%.
-6. Click **Save to device** to write it to EEPROM.
+2. Go to the **Settings** tab and pick the port. On Windows it's usually the
+   one described as *Arduino* or *USB Serial Device*; on Linux `/dev/ttyACM0`;
+   on macOS `/dev/cu.usbmodem…`. Switch off any pedal you haven't wired.
+3. **Connect** — the dot at the top right turns accent-coloured and reads LIVE.
+4. Back on **Calibration**, click **Learn range**, press every pedal all the
+   way down and let it back up a couple of times, then **Stop learning**. The
+   rest and full points fill in from what it saw.
+   *Or* set them by hand: with your foot off the pedal click **Set** under
+   Rest, press it fully and click **Set** under Full.
+5. Check the readouts — resting should be 0%, fully pressed 100%.
+6. Click **Save** to write it to the board's EEPROM.
 
-A tip on brakes: don't set Max at the absolute hardest you can press. Set it
+Everything is in percentages of pedal travel: "rest at 12%, full at 86%" rather
+than raw sensor counts. The app converts to whatever the hardware wants.
+
+A tip on brakes: don't set Full at the absolute hardest you can press. Set it
 where you want 100% braking to happen, which is usually a bit before the pedal
 physically stops.
 
 ### What the meter shows
 
-The track is the sensor's whole 0–1023 range, marked off in 10% steps. The
-tinted block is the part you've calibrated as usable, the solid accent fill is
-how far into that range the pedal currently is, and the bright line is the raw
-reading. The big number on the right is what a game would actually see.
+The track is the pedal's whole physical travel, marked off in 10% steps. The
+tinted block is the part you've claimed as usable, the solid accent fill is how
+far into that block the pedal currently is, and the bright line is where the
+sensor sits right now. The big number on the right is what a game would
+actually see — 0% with your foot off, 100% at the floor.
 
-## Appearance
+## Settings
 
-Click **THEME** in the top right for the theme row: dark or light, plus six
-accent colours. The choice is written to `.pedalcal.json` in your user folder
-and restored next launch.
+Everything that isn't calibration lives on the **Settings** tab:
 
-Everything is drawn on a canvas rather than using stock Tk widgets, so it looks
-identical on Windows, macOS and Linux. If you want colours of your own, edit
-`DARK`, `LIGHT` or the `ACCENTS` list in `pedalcal/theme.py` — a palette is
+- **Device** — pick the COM port, refresh the list, connect and disconnect.
+- **Pedals connected** — switch off anything you haven't wired. Disabled pedals
+  vanish from the calibration tab and read a flat zero on the board.
+- **Interface** — dark or light, twelve accent swatches, and a **Custom** field
+  that takes a colour however you have it: `#22d3ee`, `22d3ee`, `34, 211, 238`
+  or `rgb(34, 211, 238)`. Plus **Always on top**, so the window stays visible
+  over a running game while you tune.
+- **Reset everything** — calibration, pedal selection and appearance back to
+  defaults, after a confirmation. Writes to the connected board too.
+
+The **Console** strip at the bottom of the window expands to show the running
+log of what the device is saying; leave it collapsed for a cleaner window. All
+of this is remembered in `.pedalcal.json` in your user folder.
+
+Every visual element is drawn on a canvas rather than using stock Tk widgets,
+so it looks identical on Windows, macOS and Linux. To add colours of your own,
+edit `DARK`, `LIGHT` or the `ACCENTS` list in `pedalcal/theme.py` — a palette is
 just a dataclass of hex strings, and bright accents are darkened automatically
 on the light theme so they stay readable.
 
@@ -143,6 +166,10 @@ make sure the Serial Monitor's baud rate is 115200.
 Arduino boards reboot when a program opens their serial port, so the app waits
 for the bootloader before it starts talking. The window stays responsive and
 the button says "Cancel" while it happens.
+
+**A pedal moves on its own, or two pedals move together.** That's an unwired
+analog pin picking up its neighbour's signal. Switch the unused pedal off under
+Settings → Pedals connected.
 
 **The app closes by itself.** It writes what happened to `pedalcal.log` in your
 user folder (`C:\Users\<you>\pedalcal.log` on Windows). Open it — the last few
@@ -178,8 +205,8 @@ pyinstaller --onefile --windowed --name PedalCalibrator --icon docs/icon.ico run
 
 ```bash
 pip install pytest
-python -m pytest tests -q    # protocol tests
-python tests/smoke_gui.py    # drives the real GUI against the simulator
+python -m pytest tests -q    # protocol and settings tests
+python tests/smoke_gui.py    # drives the real GUI against a fake board
 ```
 
 ## License
