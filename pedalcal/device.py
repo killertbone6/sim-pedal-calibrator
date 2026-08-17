@@ -28,6 +28,35 @@ class PortInfo:
         return f"{self.device} - {self.description}"
 
 
+def explain_port_error(exc: BaseException) -> str:
+    """Turn a pyserial exception into something a human can act on."""
+    text = str(exc)
+    low = text.lower()
+
+    if "access is denied" in low or "permission" in low or "errno 13" in low:
+        return (
+            "Another program already has this port open.\n\n"
+            "The usual culprit is the Arduino IDE - close its Serial Monitor, "
+            "or close the IDE entirely. Also close any second copy of this app, "
+            "and any other pedal or telemetry tool that might be holding the "
+            "port.\n\n"
+            "On Linux you may instead need to add yourself to the dialout "
+            "group:  sudo usermod -a -G dialout $USER  (then log out and back in)."
+        )
+    if "could not open port" in low or "filenotfounderror" in low or "no such" in low:
+        return (
+            "That port isn't there any more.\n\n"
+            "Unplug the board, plug it back in, click Refresh, and pick the "
+            "port again - Windows sometimes assigns a different COM number."
+        )
+    if "device reports readiness" in low or "handle is invalid" in low:
+        return (
+            "The driver accepted the port but the device isn't responding.\n\n"
+            "Unplug and replug the board, then try again."
+        )
+    return "The serial port could not be opened."
+
+
 def list_serial_ports(include_simulator: bool = True) -> list[PortInfo]:
     """Every serial port the OS knows about, newest-looking first.
 

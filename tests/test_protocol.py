@@ -1,6 +1,7 @@
 import pytest
 
 from pedalcal import protocol as P
+from pedalcal.device import explain_port_error
 from pedalcal.simulator import SimulatedSerial
 
 
@@ -44,6 +45,24 @@ def test_scale_clamps():
     assert P.scale(50, 100, 900) == 0.0     # below min
     assert P.scale(1000, 100, 900) == 1.0   # above max
     assert P.scale(500, 500, 500) == 0.0    # degenerate range
+
+
+@pytest.mark.parametrize("message, expected", [
+    # what pyserial actually raises on Windows when another app holds the port
+    ("could not open port 'COM4': PermissionError(13, 'Access is denied.')",
+     "Arduino IDE"),
+    # ...and on Linux without dialout membership
+    ("[Errno 13] could not open port /dev/ttyACM0: Permission denied",
+     "dialout"),
+    ("could not open port COM9: FileNotFoundError(2, 'cannot find the file')",
+     "Refresh"),
+])
+def test_port_errors_get_actionable_advice(message, expected):
+    assert expected in explain_port_error(OSError(message))
+
+
+def test_unknown_port_error_still_returns_something():
+    assert explain_port_error(RuntimeError("kaboom")).strip()
 
 
 def _exchange(sim: SimulatedSerial, command: str) -> P.Message:

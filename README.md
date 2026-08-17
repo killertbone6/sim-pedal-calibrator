@@ -6,6 +6,8 @@ The calibration is stored on the device, so it survives unplugging.
 
 ![screenshot](docs/screenshot.png)
 
+Dark and light themes, six accent colours, and your choice is remembered.
+
 ## Download (Windows)
 
 **[Get PedalCalibrator.exe from the Releases page →](../../releases/latest)**
@@ -102,11 +104,54 @@ A tip on brakes: don't set Max at the absolute hardest you can press. Set it
 where you want 100% braking to happen, which is usually a bit before the pedal
 physically stops.
 
-### What the bar shows
+### What the meter shows
 
-The dark bar is the sensor's whole 0–1023 range. The blue block is the part
-you calibrated as usable, and the white line is where the pedal is right now.
-The progress bar underneath is what a game would actually see.
+The track is the sensor's whole 0–1023 range, marked off in 10% steps. The
+tinted block is the part you've calibrated as usable, the solid accent fill is
+how far into that range the pedal currently is, and the bright line is the raw
+reading. The big number on the right is what a game would actually see.
+
+## Appearance
+
+Click **THEME** in the top right for the theme row: dark or light, plus six
+accent colours. The choice is written to `.pedalcal.json` in your user folder
+and restored next launch.
+
+Everything is drawn on a canvas rather than using stock Tk widgets, so it looks
+identical on Windows, macOS and Linux. If you want colours of your own, edit
+`DARK`, `LIGHT` or the `ACCENTS` list in `pedalcal/theme.py` — a palette is
+just a dataclass of hex strings, and bright accents are darkened automatically
+on the light theme so they stay readable.
+
+## Troubleshooting
+
+**"Another program already has this port open" / Access is denied.**
+Only one program can hold a serial port at a time. Close the Arduino IDE's
+**Serial Monitor** — that's the cause nine times out of ten. Also close any
+second copy of this app, and any other pedal or telemetry software. On Linux,
+add yourself to the `dialout` group instead:
+`sudo usermod -a -G dialout $USER`, then log out and back in.
+
+**"Connected, but no reply — is the firmware flashed?"**
+The port opened but nothing identified itself. Either the sketch isn't
+uploaded yet, or you picked the wrong port. Check by opening the Arduino IDE's
+Serial Monitor at **115200 baud** — you should see a stream of `D 512 400 300`
+lines. If you see nothing, or unreadable characters, re-upload the sketch and
+make sure the Serial Monitor's baud rate is 115200.
+
+**The window freezes for a second or two when connecting.** Expected. Most
+Arduino boards reboot when a program opens their serial port, so the app waits
+for the bootloader before it starts talking. The window stays responsive and
+the button says "Cancel" while it happens.
+
+**The app closes by itself.** It writes what happened to `pedalcal.log` in your
+user folder (`C:\Users\<you>\pedalcal.log` on Windows). Open it — the last few
+lines will say what failed. That file also records every connection attempt,
+which is handy when a port misbehaves.
+
+**Which COM port is it?** Unplug the board, look at the port list, plug it back
+in and hit Refresh — the one that appears is yours. Windows sometimes hands out
+a different COM number after a reconnect.
 
 ## Publishing a release
 
