@@ -25,6 +25,8 @@ class AppSettings:
     accent: str = DEFAULT_ACCENT
     on_top: bool = True
     console_open: bool = False
+    #: Last port that connected successfully, reselected on the next launch.
+    last_port: str = ""
     #: Which pedals are physically wired up. Unused ones are hidden.
     axes: list[bool] = field(
         default_factory=lambda: [True] * P.NUM_AXES)
@@ -49,6 +51,7 @@ def load() -> AppSettings:
         settings.accent = accent
 
     settings.on_top = bool(data.get("on_top", settings.on_top))
+    settings.last_port = str(data.get("last_port", ""))[:120]
     settings.console_open = bool(data.get("console_open", settings.console_open))
 
     axes = data.get("axes")
@@ -67,6 +70,7 @@ def save(settings: AppSettings) -> None:
             "accent": settings.accent,
             "on_top": settings.on_top,
             "console_open": settings.console_open,
+            "last_port": settings.last_port,
             "axes": settings.axes,
         }, indent=2), encoding="utf-8")
     except Exception:

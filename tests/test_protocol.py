@@ -11,7 +11,10 @@ from fake_device import FakeSerial
 
 
 def test_parses_identity():
-    assert P.parse_line("PEDALCAL 1") == P.Ident(1)
+    assert P.parse_line("PEDALCAL 3 hid") == P.Ident(3, True)
+    assert P.parse_line("PEDALCAL 3 nohid") == P.Ident(3, False)
+    # firmware older than the capability flag
+    assert P.parse_line("PEDALCAL 1") == P.Ident(1, None)
 
 
 def test_parses_data_frame():
@@ -127,7 +130,7 @@ def test_disabled_axis_reports_zero():
 
 def test_simulator_speaks_the_protocol():
     sim = FakeSerial()
-    assert _exchange(sim, "ID?") == P.Ident(P.PROTOCOL_VERSION)
+    assert _exchange(sim, "ID?") == P.Ident(P.PROTOCOL_VERSION, True)
     assert _exchange(sim, "SET 1 111 888") == P.Ack(True)
     cal, enabled = _replies(sim, "GET")
     assert isinstance(cal, P.Calibration)

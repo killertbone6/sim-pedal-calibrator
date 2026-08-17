@@ -101,6 +101,39 @@ def check_main_flow(tmp: Path) -> None:
         check(app.cfg.axes[1] is True, "app allowed every pedal to be hidden")
         app.axis_toggles[0].toggle()      # back on
 
+    def scrolling():
+        """The reported bug: the wheel did nothing while over a card."""
+        area = app.settings_page
+        if area._content_h() <= area.winfo_height():
+            return          # nothing to scroll at this window size
+        before = area.yview()[0]
+
+        class FakeWheel:
+            widget = app.pedals_card.body   # deep inside the scroll area
+            num = 5                         # X11 wheel-down
+            delta = -120
+
+        area._wheel(FakeWheel())
+        check(area.yview()[0] > before,
+              "wheel over a card did not scroll the settings page")
+
+        class Outside:
+            widget = app.panels[0]          # a different tab entirely
+            num = 5
+            delta = -120
+
+        moved = area.yview()[0]
+        area._wheel(Outside())
+        check(area.yview()[0] == moved,
+              "settings page scrolled from an event outside it")
+
+    def controller_status():
+        check(app.hid is True, f"HID capability not read: {app.hid}")
+        check("ACTIVE" in app.hid_label.cget("text"),
+              f"controller status unclear: {app.hid_label.cget('text')!r}")
+        check(app.live_label.cget("fg") == app.p.ok,
+              "connected indicator is not green")
+
     def custom_colour():
         app.custom_var.set("255, 90, 0")
         app._apply_custom_colour()
@@ -135,10 +168,32 @@ def check_main_flow(tmp: Path) -> None:
     for delay, step in ((1500, streaming), (3200, stop_learning),
                         (3500, open_settings), (3800, disable_clutch),
                         (4100, confirm_hidden), (4400, refuse_last_pedal),
+                        (4550, scrolling), (4650, controller_status),
                         (4700, custom_colour), (5100, console_open),
                         (5300, console_visible), (5600, do_reset),
                         (6000, finish)):
         root.after(delay, step)
+    root.mainloop()
+
+
+def check_port_is_remembered(tmp: Path) -> None:
+    """Second launch should come back on the same port without being told."""
+    isolate_settings(tmp)
+    use_fake_board()
+
+    root = tk.Tk()
+    app = gui.CalibratorApp(root, initial_port=FAKE_PORT)
+    root.after(1800, app._on_close)
+    root.mainloop()
+    check(S.load().last_port == FAKE_PORT, "port was not saved on connect")
+
+    root = tk.Tk()
+    app = gui.CalibratorApp(root)          # no port given this time
+    root.after(2000, lambda: check(
+        app.identified, "did not reconnect to the remembered port"))
+    root.after(2100, lambda: check(
+        app._selected_port() == FAKE_PORT, "remembered port not preselected"))
+    root.after(2400, app._on_close)
     root.mainloop()
 
 
@@ -164,6 +219,7 @@ def check_bad_port(tmp: Path) -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         check_main_flow(Path(tmp))
+        check_port_is_remembered(Path(tmp))
         check_bad_port(Path(tmp))
     for problem in FAILURES:
         print("FAIL:", problem)

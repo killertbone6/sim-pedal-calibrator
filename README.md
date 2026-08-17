@@ -85,12 +85,17 @@ card so there's nothing confusing left on screen.
 ### Flashing the firmware
 
 1. Install the [Arduino IDE](https://www.arduino.cc/en/software).
-2. Open `firmware/pedal_firmware/pedal_firmware.ino`.
-3. *(Optional, native-USB boards only)* Tools → Manage Libraries → search
-   **Joystick** → install "Joystick" by Matthew Heironimus. Then uncomment
-   `#define USE_JOYSTICK` near the top of the sketch.
+2. **Install the Joystick library first** — Tools → Manage Libraries → search
+   **Joystick** → install *Joystick* by Matthew Heironimus. Do this before you
+   flash: the sketch checks for the library at compile time and turns game
+   controller output on automatically when it's there.
+3. Open `firmware/pedal_firmware/pedal_firmware.ino`.
 4. Tools → Board / Port → pick your board.
 5. Click Upload.
+
+After connecting, the Settings tab reports **Game controller output: ACTIVE**
+when the board is presenting itself to Windows as a controller. If it says NOT
+ACTIVE, see [Troubleshooting](#troubleshooting).
 
 ## Calibrating
 
@@ -98,7 +103,7 @@ card so there's nothing confusing left on screen.
 2. Go to the **Settings** tab and pick the port. On Windows it's usually the
    one described as *Arduino* or *USB Serial Device*; on Linux `/dev/ttyACM0`;
    on macOS `/dev/cu.usbmodem…`. Switch off any pedal you haven't wired.
-3. **Connect** — the dot at the top right turns accent-coloured and reads LIVE.
+3. **Connect** — the dot at the top right turns green and reads LIVE.
 4. Back on **Calibration**, click **Learn range**, press every pedal all the
    way down and let it back up a couple of times, then **Stop learning**. The
    rest and full points fill in from what it saw.
@@ -126,7 +131,9 @@ actually see — 0% with your foot off, 100% at the floor.
 
 Everything that isn't calibration lives on the **Settings** tab:
 
-- **Device** — pick the COM port, refresh the list, connect and disconnect.
+- **Device** — pick the COM port, refresh the list, connect and disconnect. The
+  last port that connected is remembered and reconnected automatically next
+  launch. This card also reports whether game controller output is live.
 - **Pedals connected** — switch off anything you haven't wired. Disabled pedals
   vanish from the calibration tab and read a flat zero on the board.
 - **Interface** — dark or light, twelve accent swatches, and a **Custom** field
@@ -166,6 +173,22 @@ make sure the Serial Monitor's baud rate is 115200.
 Arduino boards reboot when a program opens their serial port, so the app waits
 for the bootloader before it starts talking. The window stays responsive and
 the button says "Cancel" while it happens.
+
+**The pedals calibrate, but no game sees them / they aren't in Windows'
+game controller list.** Check the Settings tab — it says whether the board is
+presenting itself as a controller. Two things cause NOT ACTIVE:
+
+1. *The board can't do it.* An Uno or Nano talks to your PC through a separate
+   USB-serial chip; the main processor is never on the USB bus, so it can't be
+   a USB game controller no matter what software you run. You need a board
+   whose processor has native USB — a **Pro Micro, Leonardo, Micro, or
+   Teensy**. These are inexpensive and drop-in: same wiring, same sketch.
+2. *The Joystick library wasn't installed when you flashed.* Install it (Tools
+   → Manage Libraries → "Joystick" by Matthew Heironimus) and upload again —
+   the sketch detects it and enables controller output by itself.
+
+To check it worked: Windows key → type `joy.cpl` → Enter. Your board should be
+listed, and its axes should move when you press the pedals.
 
 **A pedal moves on its own, or two pedals move together.** That's an unwired
 analog pin picking up its neighbour's signal. Switch the unused pedal off under

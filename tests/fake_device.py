@@ -89,7 +89,7 @@ class FakeSerial:
         cmd = parts[0].upper()
 
         if cmd == "ID?":
-            self._emit(f"{P.FIRMWARE_ID} {P.PROTOCOL_VERSION}")
+            self._emit(f"{P.FIRMWARE_ID} {P.PROTOCOL_VERSION} hid")
         elif cmd in ("GET", "LOAD"):
             self._emit(self._cal_line())
             self._emit(self._enabled_line())

@@ -10,9 +10,10 @@
  * pedal that moves on its own; disabling it makes the firmware report 0.
  *
  * Works on any Arduino. On a board with native USB (Leonardo, Pro Micro,
- * Micro, Teensy) you can also uncomment USE_JOYSTICK below and the board
- * will appear to Windows as a game controller, so games see the calibrated
- * axes directly.
+ * Micro, Teensy) it also presents itself to the OS as a game controller, so
+ * games see the calibrated axes directly - install the "Joystick" library by
+ * Matthew Heironimus and that switches itself on. An Uno or Nano cannot do
+ * this: its USB port is a separate serial chip, not the main processor.
  *
  * Wiring (per pedal - potentiometer, hall sensor or load-cell amp output):
  *      5V  ---- sensor VCC / pot outer leg 1
@@ -31,11 +32,27 @@
 #define NUM_AXES 3
 static const uint8_t PEDAL_PIN[NUM_AXES] = { A0, A1, A2 };
 
-// Uncomment on a native-USB board *after* installing the "Joystick" library
-// by Matthew Heironimus (Library Manager -> search "Joystick").
-// #define USE_JOYSTICK
+// --- game controller output -------------------------------------------
+// This switches itself on when both conditions hold:
+//   * the board has native USB (Leonardo, Micro, Pro Micro, Teensy). USBCON
+//     is defined by the core for exactly those chips; an Uno or Nano uses a
+//     separate USB-serial chip and physically cannot present as an HID
+//     device, so there is nothing to enable there.
+//   * the "Joystick" library by Matthew Heironimus is installed.
+// Define PEDALCAL_NO_JOYSTICK above this line to force it off.
+#if !defined(PEDALCAL_NO_JOYSTICK) && defined(USBCON)
+  #if defined(__has_include)
+    #if __has_include(<Joystick.h>)
+      #define USE_JOYSTICK 1
+    #else
+      #warning "Joystick library not found - no game controller output. Install \"Joystick\" by Matthew Heironimus via Tools > Manage Libraries."
+    #endif
+  #else
+    #define USE_JOYSTICK 1
+  #endif
+#endif
 
-static const uint16_t PROTOCOL_VERSION = 2;
+static const uint16_t PROTOCOL_VERSION = 3;
 static const uint16_t ADC_MAX     = 1023;
 static const uint16_t STREAM_MS   = 20;     // 20 ms -> 50 frames/second
 static const uint8_t  OVERSAMPLE  = 4;      // averaged reads, cheap smoothing
@@ -134,7 +151,15 @@ static void handleCommand(char *line) {
   if (line[0] == '\0') return;
 
   if (!strcmp(line, "ID?")) {
-    Serial.print(F("PEDALCAL ")); Serial.println(PROTOCOL_VERSION);
+    // The third field tells the app whether this board is presenting itself
+    // to the OS as a game controller, so it can say so instead of leaving
+    // people wondering why the pedals calibrate but no game sees them.
+    Serial.print(F("PEDALCAL ")); Serial.print(PROTOCOL_VERSION);
+#ifdef USE_JOYSTICK
+    Serial.println(F(" hid"));
+#else
+    Serial.println(F(" nohid"));
+#endif
     return;
   }
   if (!strcmp(line, "GET")) { sendCal(); sendEnabled(); return; }

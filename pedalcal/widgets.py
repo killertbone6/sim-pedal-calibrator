@@ -556,11 +556,14 @@ class ScrollArea(tk.Canvas, Themed):
         self._thumb = None
         self.bind("<Configure>", self._on_resize)
         self.body.bind("<Configure>", self._on_body)
-        # Wheel events only reach the widget under the pointer, and X11 sends
-        # them as buttons 4/5 while Windows and macOS send <MouseWheel>.
-        for target in (self, self.body):
-            target.bind("<Enter>", self._grab_wheel)
-            target.bind("<Leave>", self._release_wheel)
+        # Wheel events go to the widget under the pointer, and X11 sends them
+        # as buttons 4/5 where Windows and macOS send <MouseWheel>. Binding
+        # globally and then checking where the pointer actually is beats
+        # tracking Enter/Leave: moving onto a child widget fires Leave on its
+        # parent, so an Enter/Leave scheme stops scrolling the moment the
+        # pointer crosses onto one of the cards - which is most of the area.
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(sequence, self._wheel, add="+")
 
     # -- geometry --------------------------------------------------------
 
@@ -596,16 +599,23 @@ class ScrollArea(tk.Canvas, Themed):
 
     # -- wheel -----------------------------------------------------------
 
-    def _grab_wheel(self, _event=None) -> None:
-        self.bind_all("<MouseWheel>", self._wheel)
-        self.bind_all("<Button-4>", self._wheel)
-        self.bind_all("<Button-5>", self._wheel)
-
-    def _release_wheel(self, _event=None) -> None:
-        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.unbind_all(sequence)
+    def _pointer_inside(self, event) -> bool:
+        """True when the event happened on this area or anything inside it."""
+        node = event.widget
+        if isinstance(node, str):
+            try:
+                node = self.nametowidget(node)
+            except Exception:
+                return False
+        while node is not None:
+            if node is self:
+                return True
+            node = getattr(node, "master", None)
+        return False
 
     def _wheel(self, event) -> None:
+        if not self.winfo_ismapped() or not self._pointer_inside(event):
+            return
         if self._content_h() <= self.winfo_height():
             return
         if getattr(event, "num", None) == 4:

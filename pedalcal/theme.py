@@ -19,6 +19,8 @@ class Palette:
     accent_seed: str  # the swatch the user actually picked
     on_accent: str    # type drawn on top of the accent
     danger: str
+    ok: str           # connected. Deliberately not the accent: red/green is
+    offline: str      # a convention worth more than palette consistency.
 
     def with_accent(self, seed: str) -> "Palette":
         """Adopt a swatch, adapting it to this background.
@@ -49,6 +51,8 @@ DARK = Palette(
     accent_seed="#22d3ee",
     on_accent="#07090c",
     danger="#f87171",
+    ok="#22c55e",
+    offline="#ef4444",
 )
 
 LIGHT = Palette(
@@ -64,6 +68,8 @@ LIGHT = Palette(
     accent_seed="#22d3ee",
     on_accent="#ffffff",
     danger="#dc2626",
+    ok="#15803d",
+    offline="#dc2626",
 )
 
 PALETTES = {"dark": DARK, "light": LIGHT}

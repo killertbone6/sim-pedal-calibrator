@@ -14,7 +14,9 @@ PC  ->  device
     STREAM <0|1>            turn the live value stream off / on
 
 device -> PC
-    PEDALCAL <version>          identity banner (reply to ID?)
+    PEDALCAL <version> [hid|nohid]  identity banner (reply to ID?); the third
+                                field says whether the board is presenting
+                                itself to the OS as a game controller
     D <raw0> <raw1> <raw2>      live raw ADC values, ~50 per second
     C <min0> <max0> ... <max2>  the current calibration (reply to GET / LOAD)
     E <en0> <en1> <en2>         which axes are in use (reply to GET / LOAD)
@@ -28,7 +30,7 @@ from dataclasses import dataclass
 
 BAUD = 115200
 FIRMWARE_ID = "PEDALCAL"
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 AXIS_NAMES = ("Throttle", "Brake", "Clutch")
 NUM_AXES = len(AXIS_NAMES)
@@ -44,9 +46,16 @@ ADC_MAX = 1023
 
 @dataclass(frozen=True)
 class Ident:
-    """Reply to ``ID?`` - confirms we are talking to pedal firmware."""
+    """Reply to ``ID?`` - confirms we are talking to pedal firmware.
+
+    ``hid`` is True when the board also appears to the operating system as a
+    game controller, False when it doesn't, and None for older firmware that
+    predates the flag. Calibrating works either way, but only a board with
+    native USB can feed the axes to a game.
+    """
 
     version: int
+    hid: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -119,7 +128,10 @@ def parse_line(line: str) -> Message:
     try:
         if tag == FIRMWARE_ID:
             version = int(parts[1]) if len(parts) > 1 else 0
-            return Ident(version)
+            hid = None
+            if len(parts) > 2:
+                hid = parts[2].lower() == "hid"
+            return Ident(version, hid)
 
         if tag == "D" and len(parts) == NUM_AXES + 1:
             return Data(tuple(int(p) for p in parts[1:]))

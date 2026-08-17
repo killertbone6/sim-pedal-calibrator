@@ -195,9 +195,15 @@ class CalibratorApp(tk.Frame):
 
         self._apply_axis_visibility()
         self.set_on_top(self.cfg.on_top)
-        self.refresh_ports(select=initial_port)
+        self.refresh_ports(select=initial_port or self.cfg.last_port)
+        remembered = (initial_port is None and self.cfg.last_port
+                      and self._selected_port() == self.cfg.last_port)
         if initial_port is not None:
             self._schedule(200, self.toggle_connection)
+        elif remembered:
+            self._schedule(200,
+                           lambda: self._begin_connect(self.cfg.last_port,
+                                                       quiet=True))
         self._schedule(POLL_MS, self._tick)
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -284,16 +290,22 @@ class CalibratorApp(tk.Frame):
 
         self.live_label = tk.Label(row, text=W.spaced("OFFLINE"),
                                    font=W.ui(8, "bold"), bg=self.p.bg,
-                                   fg=self.p.text_dim)
+                                   fg=self.p.offline)
         self.live_label.pack(side="right", padx=(0, 8))
-        self._reg(self.live_label, bg="bg", fg="text_dim")
+        self._reg(self.live_label, bg="bg")
         self._paint_dot()
+
+    def _status_colour(self) -> str:
+        """Green connected, red not. Deliberately outside the accent palette -
+        a connection light is one of the few places where the colour means
+        something specific and shouldn't change with the theme."""
+        return self.p.ok if self.identified else self.p.offline
 
     def _paint_dot(self) -> None:
         self.live_dot.delete("all")
         self.live_dot.configure(bg=self.p.bg)
-        colour = self.p.accent if self.identified else self.p.border
-        self.live_dot.create_oval(1, 1, 9, 9, fill=colour, width=0)
+        self.live_dot.create_oval(1, 1, 9, 9, fill=self._status_colour(),
+                                  width=0)
 
     def _build_tabs(self) -> None:
         row = tk.Frame(self, bg=self.p.bg)
@@ -388,7 +400,16 @@ class CalibratorApp(tk.Frame):
         self.port_select.configure(bg=self.p.surface)
         self.port_select.pack(side="left", fill="x", expand=True)
         self.themed.append(self.port_select)
+
+        self.hid_label = tk.Label(card.body, justify="left", anchor="w",
+                                  font=W.ui(8), bg=self.p.surface,
+                                  fg=self.p.text_dim)
+        self.hid_label.pack(anchor="w", fill="x", pady=(10, 0))
+        self._reg(self.hid_label, bg="surface")
+        self.hid = None
+        self._set_hid_label()
         card.fit()
+        self.device_card = card
 
         # --- which pedals exist ----------------------------------------
         card = self._card(page, "pedals connected")
@@ -534,6 +555,24 @@ class CalibratorApp(tk.Frame):
         self.log_box.see("end")
         self.log_box.config(state="disabled")
 
+    def _set_hid_label(self) -> None:
+        """Say plainly whether games will actually see the pedals."""
+        if not hasattr(self, "hid_label"):
+            return
+        if self.hid is None:
+            text, colour = "Game controller output: unknown until connected", \
+                self.p.text_dim
+        elif self.hid:
+            text, colour = "Game controller output: ACTIVE", self.p.ok
+        else:
+            text, colour = (
+                "Game controller output: NOT ACTIVE - this board can't act as\n"
+                "one, or the Joystick library wasn't installed when you flashed\n"
+                "it. Calibration still works. See the README.", self.p.offline)
+        self.hid_label.config(text=text, fg=colour)
+        if hasattr(self, "device_card"):
+            self.device_card.fit()
+
     # -- settings actions ------------------------------------------------
 
     def _set_axis_enabled(self, index: int, value: bool) -> None:
@@ -603,6 +642,8 @@ class CalibratorApp(tk.Frame):
                 child.configure(bg=parent_bg)
             child.apply_theme(palette)
         self._paint_dot()
+        self.live_label.config(fg=self._status_colour())
+        self._set_hid_label()
         self._sync_appearance_buttons()
 
     def _sync_appearance_buttons(self) -> None:
@@ -658,8 +699,8 @@ class CalibratorApp(tk.Frame):
         self.status_label.config(text=text)
 
     def _set_live(self, live: bool) -> None:
-        self.live_label.config(text=W.spaced("LIVE" if live else "OFFLINE"))
-        self.live_label.config(fg=self.p.accent if live else self.p.text_dim)
+        self.live_label.config(text=W.spaced("LIVE" if live else "OFFLINE"),
+                               fg=self._status_colour())
         self._paint_dot()
 
     def _set_connect_button(self, text: str, variant: str) -> None:
@@ -692,7 +733,12 @@ class CalibratorApp(tk.Frame):
                          "No serial port found. Plug the board in and press "
                          "Refresh.")
             return
+        self._begin_connect(port)
 
+    def _begin_connect(self, port: str, quiet: bool = False) -> None:
+        """`quiet` reports failures in the status line instead of a dialog -
+        used when reconnecting to the remembered port at startup, where a
+        modal error box for an unplugged board would be obnoxious."""
         # Opening a port takes a couple of seconds - most Arduino boards reset
         # when you connect and need time to boot. Doing that on the GUI thread
         # freezes the window, which looks exactly like a crash, so it happens
@@ -714,34 +760,42 @@ class CalibratorApp(tk.Frame):
                 outcome["error"] = exc
 
         threading.Thread(target=worker, daemon=True).start()
-        self._schedule(100, lambda: self._finish_connect(outcome, port))
+        self._schedule(100, lambda: self._finish_connect(outcome, port, quiet))
 
-    def _finish_connect(self, outcome: dict, port: str) -> None:
+    def _finish_connect(self, outcome: dict, port: str,
+                        quiet: bool = False) -> None:
         if not self._alive or not self._connecting:
             dev = outcome.get("device")
             if dev is not None:
                 dev.close()
             return
         if not outcome:
-            self._schedule(100, lambda: self._finish_connect(outcome, port))
+            self._schedule(100,
+                           lambda: self._finish_connect(outcome, port, quiet))
             return
 
         self._connecting = False
         error = outcome.get("error")
         if error is not None:
             self._set_connect_button("connect", "primary")
-            self._set_status("Not connected")
             self.log(f"failed to open {port}: {error}")
             write_log(f"connect failed: {port}: {error!r}")
-            self._dialog(
-                messagebox.showerror, f"Could not open {port}",
-                f"{explain_port_error(error)}\n\nTechnical detail:\n{error}",
-            )
+            if quiet:
+                self._set_status(f"{port} did not open - pick a port in Settings")
+            else:
+                self._set_status("Not connected")
+                self._dialog(
+                    messagebox.showerror, f"Could not open {port}",
+                    f"{explain_port_error(error)}\n\nTechnical detail:\n{error}",
+                )
             return
 
         self.device = outcome["device"]
         self.identified = False
         self._handshakes = 0
+        if self.cfg.last_port != port:
+            self.cfg.last_port = port      # reselected on the next launch
+            S.save(self.cfg)
         self._set_connect_button("disconnect", "ghost")
         self._set_status(f"Connected to {port} - waiting for firmware...")
         self.log(f"opened {port}")
@@ -772,9 +826,11 @@ class CalibratorApp(tk.Frame):
             self.device.close()
             self.device = None
         self.identified = False
+        self.hid = None
         self._set_connect_button("connect", "primary")
         self._set_status("Not connected")
         self._set_live(False)
+        self._set_hid_label()
         self.log("disconnected")
 
     # -- commands --------------------------------------------------------
@@ -848,9 +904,15 @@ class CalibratorApp(tk.Frame):
                     panel.set_limits(seen[0], seen[1])
         elif isinstance(msg, P.Ident):
             self.identified = True
+            self.hid = msg.hid
             self._set_live(True)
-            self._set_status(f"Connected - pedal firmware v{msg.version}")
-            self.log(f"identified: {P.FIRMWARE_ID} v{msg.version}")
+            self._set_hid_label()
+            controller = {True: "game controller active",
+                          False: "no game controller output",
+                          None: "controller state unknown"}[msg.hid]
+            self._set_status(f"Connected - firmware v{msg.version}, {controller}")
+            self.log(f"identified: {P.FIRMWARE_ID} v{msg.version} "
+                     f"({'hid' if msg.hid else 'nohid'})")
             self._push_axis_enables()
         elif isinstance(msg, P.Calibration):
             for panel, (lo, hi) in zip(self.panels, msg.points):
