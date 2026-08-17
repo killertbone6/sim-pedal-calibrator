@@ -20,22 +20,29 @@ before you have any hardware wired up.
 
 ## Try it without hardware
 
-Requires **Python 3.10 or newer**.
+You need **Python 3.10 or newer** installed. If you don't have it: get it from
+[python.org/downloads](https://www.python.org/downloads/) and **tick "Add
+python.exe to PATH"** on the first installer screen. That box matters — without
+it Windows won't find Python later.
+
+**Windows:** double-click **`Run Simulator.bat`**. It installs the one
+dependency the first time, then opens the app on three fake pedals.
+`Run Calibrator.bat` is the same thing but for real hardware.
+
+**macOS / Linux:** `./run.sh --simulate`
+
+**Any platform, from a terminal:**
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/sim-pedal-calibrator.git
-cd sim-pedal-calibrator
 pip install -r requirements.txt
-python -m pedalcal --simulate
+python -m pedalcal --simulate      # fake pedals
+python -m pedalcal                 # real hardware
+python -m pedalcal --list          # just print the ports found
 ```
 
-Three fake pedals will start sweeping. Everything in the UI works.
-
-To see the real ports on your machine:
-
-```bash
-python -m pedalcal --list
-```
+There is no single "app file" to open — it's a Python program, so it's started
+by one of the launchers above. If you want a true double-clickable `.exe` with
+no Python at all, see [Building a Windows .exe](#building-a-windows-exe).
 
 ## The hardware side
 
