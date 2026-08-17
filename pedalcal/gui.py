@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import protocol as P
 from .device import PedalDevice, PortInfo, list_serial_ports
+from .icon_data import ICON_PNG_B64
 
 POLL_MS = 25  # how often the UI drains the serial queue
 
@@ -312,15 +311,6 @@ class CalibratorApp(ttk.Frame):
         self.master.destroy()
 
 
-def _icon_path() -> Path:
-    """Where icon.png lives, both when run from source and inside a
-    PyInstaller one-file build (which unpacks to sys._MEIPASS)."""
-    bundled = getattr(sys, "_MEIPASS", None)
-    if bundled:
-        return Path(bundled) / "pedalcal" / "icon.png"
-    return Path(__file__).resolve().parent / "icon.png"
-
-
 def run(initial_port: str | None = None) -> None:
     root = tk.Tk()
     try:
@@ -328,7 +318,9 @@ def run(initial_port: str | None = None) -> None:
     except tk.TclError:
         pass
     try:
-        root._icon = tk.PhotoImage(file=str(_icon_path()))  # keep a reference
+        # The icon is embedded in the source, so a one-file build has no data
+        # files to unpack and no paths to get wrong.
+        root._icon = tk.PhotoImage(data=ICON_PNG_B64)  # keep a reference
         root.iconphoto(True, root._icon)
     except Exception:
         pass  # cosmetic only, never worth failing over

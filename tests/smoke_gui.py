@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pedalcal.gui import CalibratorApp  # noqa: E402
+from pedalcal.icon_data import ICON_PNG_B64  # noqa: E402
 
 FAILURES = []
 
@@ -19,6 +20,11 @@ FAILURES = []
 def main() -> int:
     root = tk.Tk()
     root.geometry("620x680")
+    try:
+        root._icon = tk.PhotoImage(data=ICON_PNG_B64)
+        root.iconphoto(True, root._icon)
+    except Exception as exc:
+        FAILURES.append(f"embedded icon failed to load: {exc}")
     app = CalibratorApp(root, initial_port="SIMULATOR")  # auto-connects
 
     def check_streaming():

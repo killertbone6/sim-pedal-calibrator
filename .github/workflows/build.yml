@@ -14,35 +14,37 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest
-      - run: pytest tests -q
+      # "python -m pytest" (not bare "pytest") so the repo root lands on
+      # sys.path and "import pedalcal" resolves.
+      - run: python -m pytest tests -q
 
   windows-exe:
     runs-on: windows-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
 
-      # --onefile   : a single .exe, nothing to install
-      # --windowed  : no console window behind the app
-      # --add-data  : bundle the window icon (";" is the Windows separator)
+      # --onefile  : a single .exe, nothing to install
+      # --windowed : no console window behind the app
+      # The window icon is embedded in the source, so there are no data files
+      # to bundle here.
       - name: Build PedalCalibrator.exe
         run: >
           pyinstaller --onefile --windowed
           --name PedalCalibrator
           --icon docs/icon.ico
-          --add-data "pedalcal/icon.png;pedalcal"
           run_app.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: PedalCalibrator-windows
           path: dist/PedalCalibrator.exe

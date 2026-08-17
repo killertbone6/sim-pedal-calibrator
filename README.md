@@ -126,17 +126,14 @@ To build one yourself instead:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name PedalCalibrator ^
-  --icon docs/icon.ico --add-data "pedalcal/icon.png;pedalcal" run_app.py
+pyinstaller --onefile --windowed --name PedalCalibrator --icon docs/icon.ico run_app.py
 ```
-
-(On macOS/Linux the `--add-data` separator is `:` instead of `;`.)
 
 ## Running the tests
 
 ```bash
 pip install pytest
-pytest tests -q              # protocol tests
+python -m pytest tests -q    # protocol tests
 python tests/smoke_gui.py    # drives the real GUI against the simulator
 ```
 

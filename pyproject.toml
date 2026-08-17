@@ -16,3 +16,8 @@ pedalcal = "pedalcal.__main__:main"
 
 [tool.setuptools]
 packages = ["pedalcal"]
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so "import pedalcal" works whether the tests
+# are started as "pytest" or "python -m pytest".
+pythonpath = ["."]
