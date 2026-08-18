@@ -50,6 +50,7 @@ no Python at all, see [Building a Windows .exe](#building-a-windows-exe).
 |---|---|
 | `pedalcal/` | The desktop app (Python + Tkinter) |
 | `firmware/pedal_firmware/` | Arduino sketch for the pedal controller |
+| `firmware/hid_test/` | Tiny sketch that proves the board can be a game controller |
 | `docs/PROTOCOL.md` | The serial protocol, if you want to talk to the device yourself |
 | `pedalcal/theme.py` | Palettes and colour parsing |
 | `pedalcal/widgets.py` | The canvas-drawn widget kit |
@@ -85,17 +86,63 @@ card so there's nothing confusing left on screen.
 ### Flashing the firmware
 
 1. Install the [Arduino IDE](https://www.arduino.cc/en/software).
-2. **Install the Joystick library first** — Tools → Manage Libraries → search
-   **Joystick** → install *Joystick* by Matthew Heironimus. Do this before you
-   flash: the sketch checks for the library at compile time and turns game
-   controller output on automatically when it's there.
+2. **Install the right Joystick library first** — see below. Do this before you
+   flash: the sketch checks at compile time and turns game controller output on
+   automatically when the correct library is present.
 3. Open `firmware/pedal_firmware/pedal_firmware.ino`.
 4. Tools → Board / Port → pick your board.
 5. Click Upload.
 
-After connecting, the Settings tab reports **Game controller output: ACTIVE**
-when the board is presenting itself to Windows as a controller. If it says NOT
+The board appears to Windows as a game controller with **X = throttle,
+Y = brake, Z = clutch**. After connecting, the Settings tab reports
+**Game controller output: ACTIVE** when that's live. If it says NOT
 ACTIVE, see [Troubleshooting](#troubleshooting).
+
+### The Joystick library, and the other Joystick library
+
+There are **two different Arduino libraries called Joystick**, and this trips
+up almost everyone:
+
+| | What it is | Works here? |
+|---|---|---|
+| **ArduinoJoystickLibrary** by Matthew Heironimus | Makes the board *appear as* a USB game controller | ✅ this is the one you need |
+| **Joystick** by Giuseppe Martini | Reads an analog thumbstick *module* wired to the board | ❌ unrelated |
+
+The Library Manager index lists Giuseppe Martini's under the name "Joystick",
+so searching for it finds the wrong one — and because Heironimus's library also
+declares its name as "Joystick", the IDE may show it as installed *by Giuseppe
+Martini* even when you've installed the right files. Both provide a
+`Joystick.h`, so the header name proves nothing either.
+
+**Installing the right one:**
+
+1. In Library Manager, **Remove** "Joystick" by Giuseppe Martini if it's there —
+   with both installed, which `Joystick.h` wins is anyone's guess.
+2. Download [ArduinoJoystickLibrary](https://github.com/MHeironimus/ArduinoJoystickLibrary)
+   → green **Code** button → **Download ZIP**.
+3. Arduino IDE → Sketch → Include Library → **Add .ZIP Library** → pick that zip.
+4. Check it landed: `Documents\Arduino\libraries\ArduinoJoystickLibrary-master\src\`
+   should contain both `Joystick.h` and a `DynamicHID` folder. The `DynamicHID`
+   folder is the giveaway — the other library doesn't have one, and it's exactly
+   what the sketch tests for.
+5. Also confirmable from File → Examples: the right library adds *JoystickTest*,
+   *GamepadExample* and *MultipleJoystickTest*.
+
+**Quickest way to test the library in isolation:** upload
+`firmware/hid_test/hid_test.ino`. It ignores pedals entirely and just sweeps
+one axis, so `joy.cpl` tells you in seconds whether the board and library are
+capable at all. Its header comment explains what each possible outcome means.
+
+**To see which library your sketch actually compiled against:** File →
+Preferences → tick **Show verbose output during: compilation**, then Verify.
+Near the end of the output there's a line reading
+`Using library Joystick at version 2.x.x in folder: ...` — that path is the
+definitive answer.
+
+If the wrong library is installed, compiling prints a warning naming the
+problem, and the app reports **NOT ACTIVE** once you connect — rather than
+silently handing you a board that calibrates fine but no game can see. The
+sketch still builds and works as a calibrator either way.
 
 ## Calibrating
 
@@ -174,6 +221,13 @@ Arduino boards reboot when a program opens their serial port, so the app waits
 for the bootloader before it starts talking. The window stays responsive and
 the button says "Cancel" while it happens.
 
+**The board enumerates but never appears in `joy.cpl`.** If a minimal sketch
+of your own registers fine but this one doesn't, suspect the HID descriptor
+rather than the wiring. A descriptor advertising zero buttons and zero hat
+switches enumerates as a valid HID device but doesn't reliably show up as a
+*game controller* — this sketch therefore uses the library's default
+descriptor, the one every working example uses.
+
 **The pedals calibrate, but no game sees them / they aren't in Windows'
 game controller list.** Check the Settings tab — it says whether the board is
 presenting itself as a controller. Two things cause NOT ACTIVE:
@@ -183,12 +237,33 @@ presenting itself as a controller. Two things cause NOT ACTIVE:
    a USB game controller no matter what software you run. You need a board
    whose processor has native USB — a **Pro Micro, Leonardo, Micro, or
    Teensy**. These are inexpensive and drop-in: same wiring, same sketch.
-2. *The Joystick library wasn't installed when you flashed.* Install it (Tools
-   → Manage Libraries → "Joystick" by Matthew Heironimus) and upload again —
-   the sketch detects it and enables controller output by itself.
+2. *The wrong library, or no library.* There are two Arduino libraries named
+   Joystick and only one of them does HID — see
+   [The Joystick library, and the other Joystick library](#the-joystick-library-and-the-other-joystick-library).
+   The sketch warns you at compile time which case you're in.
 
 To check it worked: Windows key → type `joy.cpl` → Enter. Your board should be
 listed, and its axes should move when you press the pedals.
+
+**Upload fails: `butterfly_recv ... failed` / `initialization failed (rc = -1)`.**
+The sketch compiled fine — avrdude just couldn't reach the board's bootloader.
+On a 32u4 board (Pro Micro, Leonardo, Micro) that's almost always one of:
+
+1. *Something else is holding the COM port.* **Close this app before you
+   upload** — it reconnects to the last port automatically when it starts, so
+   simply having it open is enough to block avrdude. Clicking Disconnect works
+   too, as does closing the Arduino Serial Monitor.
+2. *The IDE is talking to the wrong port.* A 32u4 board exposes a **different**
+   COM port for about eight seconds while its bootloader runs. Click Upload,
+   and the moment the status line says "Uploading", tap the board's RST to GND
+   twice quickly. A new COM port appears — select it under Tools → Port if the
+   IDE doesn't grab it itself.
+3. *Board selection doesn't match the hardware.* A SparkFun Pro Micro reports
+   different USB IDs than a Leonardo, and the IDE uses those to find the
+   bootloader port. Install **SparkFun AVR Boards** via Boards Manager and
+   select *SparkFun Pro Micro* with the processor your board actually is —
+   usually **ATmega32U4 (5V, 16 MHz)**. Picking 3.3V/8MHz on a 5V board makes
+   uploads flaky in exactly this way.
 
 **A pedal moves on its own, or two pedals move together.** That's an unwired
 analog pin picking up its neighbour's signal. Switch the unused pedal off under

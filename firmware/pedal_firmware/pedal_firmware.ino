@@ -33,23 +33,40 @@
 static const uint8_t PEDAL_PIN[NUM_AXES] = { A0, A1, A2 };
 
 // --- game controller output -------------------------------------------
-// This switches itself on when both conditions hold:
-//   * the board has native USB (Leonardo, Micro, Pro Micro, Teensy). USBCON
-//     is defined by the core for exactly those chips; an Uno or Nano uses a
-//     separate USB-serial chip and physically cannot present as an HID
-//     device, so there is nothing to enable there.
-//   * the "Joystick" library by Matthew Heironimus is installed.
-// Define PEDALCAL_NO_JOYSTICK above this line to force it off.
+// Switches itself on when both conditions hold:
+//
+//   * the board has native USB (Leonardo, Micro, Pro Micro, Teensy). USBCON is
+//     defined by the core for exactly those chips; an Uno or Nano uses a
+//     separate USB-serial chip and physically cannot present as an HID device.
+//
+//   * the right Joystick library is installed. Two different libraries are
+//     called "Joystick" - the HID one by Matthew Heironimus that this sketch
+//     needs, and an unrelated analog-thumbstick reader by Giuseppe Martini
+//     which is the one the Library Manager index lists under that name. Both
+//     provide <Joystick.h>, so testing for that header alone proves nothing.
+//     Only Heironimus's ships DynamicHID, so that is what we look for - and
+//     we never include the wrong header, which would fail to compile with a
+//     confusing error about Joystick_ not existing.
+//
+// Define PEDALCAL_NO_JOYSTICK above this line to force controller output off.
+
 #if !defined(PEDALCAL_NO_JOYSTICK) && defined(USBCON)
-  #if defined(__has_include)
-    #if __has_include(<Joystick.h>)
-      #define USE_JOYSTICK 1
-    #else
-      #warning "Joystick library not found - no game controller output. Install \"Joystick\" by Matthew Heironimus via Tools > Manage Libraries."
-    #endif
-  #else
+  #if !defined(__has_include)
+    #include <Joystick.h>          // ancient toolchain: hope for the best
     #define USE_JOYSTICK 1
+  #elif __has_include(<Joystick.h>) && __has_include(<DynamicHID/DynamicHID.h>)
+    #include <Joystick.h>
+    #define USE_JOYSTICK 1
+  #elif __has_include(<Joystick.h>)
+    #warning "The installed Joystick library is the wrong one - no game controller output. Remove the Joystick library by Giuseppe Martini and install ArduinoJoystickLibrary by Matthew Heironimus: https://github.com/MHeironimus/ArduinoJoystickLibrary"
+  #else
+    #warning "No Joystick library found - no game controller output. Install ArduinoJoystickLibrary by Matthew Heironimus: https://github.com/MHeironimus/ArduinoJoystickLibrary"
   #endif
+#endif
+
+#if defined(USE_JOYSTICK) && !defined(JOYSTICK_DEFAULT_REPORT_ID)
+  // Belt and braces: the header came from somewhere unexpected.
+  #error "Joystick.h does not look like ArduinoJoystickLibrary. Remove any other library named Joystick."
 #endif
 
 static const uint16_t PROTOCOL_VERSION = 3;
@@ -71,11 +88,16 @@ static uint8_t  buflen = 0;
 static uint32_t nextFrame = 0;
 
 #ifdef USE_JOYSTICK
-  #include <Joystick.h>
-  Joystick_ joystick(JOYSTICK_DEFAULT_REPORT_ID, JOYSTICK_TYPE_JOYSTICK,
-                     0, 0,                 // no buttons, no hat switch
-                     true, true, true,     // X, Y, Z  = throttle, brake, clutch
-                     false, false, false, false, false, false, false, false);
+  // The default constructor, as used by every working example of this
+  // library. It advertises 32 buttons, 2 hat switches and every axis. Three
+  // pedals need far less, but a descriptor claiming zero buttons and zero hat
+  // switches is the configuration Windows is fussy about: the board
+  // enumerates as a HID device and yet doesn't reliably show up as a game
+  // controller. Unused buttons and axes just read as idle, which costs
+  // nothing, so this stays on the well-trodden path.
+  //
+  // Axis mapping:  X = throttle,  Y = brake,  Z = clutch.
+  Joystick_ joystick;
 #endif
 
 // ------------------------------------------------------------- helpers
