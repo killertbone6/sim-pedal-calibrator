@@ -693,21 +693,23 @@ class Card(tk.Canvas, Themed):
 
 
 class Meter(tk.Canvas, Themed):
-    """The telemetry bar: full sensor span, calibrated band, live needle."""
+    """The pedal bar: calibrated output from 0 to 100%.
 
-    def __init__(self, master, palette: Palette, height: int = 38,
-                 adc_max: int = 1023) -> None:
+    It deliberately shows output rather than where the sensor sits in its raw
+    range. Setting the rest point therefore drops the bar to empty and setting
+    full sends it to the end, which is how every other pedal tool behaves and
+    what makes the calibration feel like it did something.
+    """
+
+    def __init__(self, master, palette: Palette, height: int = 38) -> None:
         super().__init__(master, height=height, highlightthickness=0, bd=0,
                          bg=palette.surface)
         self.p = palette
-        self.adc_max = adc_max
-        self.raw = 0
-        self.lo = 0
-        self.hi = adc_max
+        self.output = 0.0
         self.bind("<Configure>", lambda _e: self.redraw())
 
-    def set_values(self, raw: int, lo: int, hi: int) -> None:
-        self.raw, self.lo, self.hi = raw, lo, hi
+    def set_output(self, fraction: float) -> None:
+        self.output = max(0.0, min(1.0, fraction))
         self.redraw()
 
     def redraw(self) -> None:
@@ -719,43 +721,26 @@ class Meter(tk.Canvas, Themed):
         if w <= 1:
             return
 
-        def x_of(value: float) -> float:
-            return 2 + (w - 4) * (value / self.adc_max)
-
-        # track
         round_rect(self, 2, 2, w - 2, h - 2, 7, fill=p.surface_alt,
                    outline=mix(p.surface_alt, p.border, 0.8), width=1)
 
-        lo_x, hi_x = x_of(self.lo), x_of(self.hi)
-        if hi_x > lo_x:
-            round_rect(self, lo_x, 3, hi_x, h - 3, 5,
-                       fill=mix(p.surface_alt, p.accent, 0.16), width=0)
+        span = w - 8
+        end = 4 + span * self.output
 
-        # 10% graticule, the detail that makes it read as an instrument. Drawn
-        # after the range band so it stays visible inside it - with a default
-        # 0-100% calibration the band covers the whole track, and a graticule
-        # underneath would leave a featureless slab.
+        # Graticule first, so the fill covers it. Drawn over the top it reads
+        # as heavy dividers chopping the bar into segments.
         grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
         for i in range(1, 10):
-            x = 2 + (w - 4) * i / 10
-            self.create_line(x, 5, x, h - 5, fill=grid)
+            x = 4 + span * i / 10
+            self.create_line(x, 6, x, h - 6, fill=grid)
 
-        # fill up to the current reading, with a soft halo underneath
-        fill_x = min(max(x_of(self.raw), lo_x), hi_x)
-        if fill_x > lo_x + 1:
-            round_rect(self, lo_x, 1, fill_x + 2, h - 1, 7,
+        if self.output > 0.001:
+            round_rect(self, 2, 1, end + 2, h - 1, 7,
                        fill=mix(p.surface if p.dark else p.surface_alt,
                                 p.accent, 0.35), width=0)
-            round_rect(self, lo_x, 4, fill_x, h - 4, 5, fill=p.accent, width=0)
-
-        # calibration edges
-        for x in (lo_x, hi_x):
-            self.create_line(x, 2, x, h - 2, fill=mix(p.text_dim, p.text, 0.3))
-
-        # live needle
-        nx = x_of(self.raw)
-        self.create_line(nx, 0, nx, h, fill=mix(p.accent, "#ffffff", 0.75),
-                         width=2)
+            round_rect(self, 4, 4, end, h - 4, 5, fill=p.accent, width=0)
+            self.create_line(end, 3, end, h - 3,
+                             fill=mix(p.accent, "#ffffff", 0.7), width=2)
 
     def apply_theme(self, palette: Palette) -> None:
         self.p = palette

@@ -132,7 +132,7 @@ def test_simulator_speaks_the_protocol():
     sim = FakeSerial()
     assert _exchange(sim, "ID?") == P.Ident(P.PROTOCOL_VERSION, True)
     assert _exchange(sim, "SET 1 111 888") == P.Ack(True)
-    cal, enabled, curves = _replies(sim, "GET")
+    cal, enabled, curves, _dz, _sm = _replies(sim, "GET")
     assert isinstance(cal, P.Calibration)
     assert cal.points[1] == (111, 888)
     assert enabled == P.Enabled.all_on()
@@ -195,5 +195,61 @@ def test_curve_survives_the_fake_board():
     sim = FakeSerial()
     assert _exchange(sim, "CURVE 1 -30") == P.Ack(True)
     assert _exchange(sim, "CURVE 1 500") == P.Ack(False, "range")
-    _cal, _enabled, curves = _replies(sim, "GET")
+    _cal, _enabled, curves, _dz, _sm = _replies(sim, "GET")
     assert curves.axes[1] == -30
+
+
+def test_calibration_is_integer_and_matches_the_firmware():
+    """One count of drift here becomes sixteen after a steep curve."""
+    lo, hi = 120, 880
+    assert P.apply_calibration(lo, lo, hi) == 0
+    assert P.apply_calibration(hi, lo, hi) == P.ADC_MAX
+    assert P.apply_calibration(0, lo, hi) == 0
+    assert P.apply_calibration(2000, lo, hi) == P.ADC_MAX
+    assert P.apply_calibration(500, 500, 500) == 0        # degenerate
+    # rounded, not truncated
+    assert P.apply_calibration(165, lo, hi) == 61
+
+
+def test_deadzone_ignores_then_stretches():
+    assert P.apply_deadzone(0, 10) == 0
+    assert P.apply_deadzone(102, 10) == 0                  # inside the zone
+    assert P.apply_deadzone(P.ADC_MAX, 10) == P.ADC_MAX    # still reaches full
+    assert P.apply_deadzone(500, 0) == 500                 # disabled
+    # monotonic, and never exceeds full scale
+    for dz in (0, 5, 15, 30):
+        values = [P.apply_deadzone(v, dz) for v in range(P.ADC_MAX + 1)]
+        assert all(b >= a for a, b in zip(values, values[1:]))
+        assert max(values) == P.ADC_MAX
+
+
+def test_deadzone_and_rate_commands():
+    assert P.cmd_deadzone(0, 12) == "DZ 0 12"
+    assert P.cmd_smoothing(2, False) == "SM 2 0"
+    assert P.cmd_rate(120) == "RATE 120"
+    for bad in (lambda: P.cmd_deadzone(0, 99), lambda: P.cmd_deadzone(9, 0),
+                lambda: P.cmd_rate(0), lambda: P.cmd_rate(500),
+                lambda: P.cmd_smoothing(7, True)):
+        with pytest.raises(ValueError):
+            bad()
+    assert P.parse_line("Z 0 5 30") == P.Deadzone((0, 5, 30))
+    assert P.parse_line("M 1 0 1") == P.Smoothing((True, False, True))
+
+
+def test_deadzone_costs_nothing_at_the_top():
+    """A 20% deadzone must not also take 20% off full travel."""
+    lo, hi = 120, 880
+    assert P.pedal_output(hi, lo, hi, 0, 20) == 1.0
+    assert P.pedal_output(lo, lo, hi, 0, 20) == 0.0
+
+
+def test_fake_board_accepts_the_new_commands():
+    sim = FakeSerial()
+    assert _exchange(sim, "DZ 0 8") == P.Ack(True)
+    assert _exchange(sim, "DZ 0 90") == P.Ack(False, "range")
+    assert _exchange(sim, "SM 1 0") == P.Ack(True)
+    assert _exchange(sim, "RATE 120") == P.Ack(True)
+    assert _exchange(sim, "RATE 900") == P.Ack(False, "range")
+    _cal, _en, _lin, deadzone, smoothing = _replies(sim, "GET")
+    assert deadzone.axes[0] == 8
+    assert smoothing.axes[1] is False

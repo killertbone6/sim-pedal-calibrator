@@ -170,26 +170,32 @@ safe to test because it comes from the AVR headers rather than a library.
    one described as *Arduino* or *USB Serial Device*; on Linux `/dev/ttyACM0`;
    on macOS `/dev/cu.usbmodem…`. Switch off any pedal you haven't wired.
 3. **Connect** — the dot at the top right turns green and reads LIVE.
-4. Back on **Calibration**, click **Learn** on one pedal, work it through its
-   full travel a couple of times, then click **Stop**. The rest and full points
-   fill in from what it saw. Each pedal learns on its own — the others are left
-   exactly as they were.
-   *Or* set them by hand: with your foot off the pedal click **Set** under
-   Rest, press it fully and click **Set** under Full.
-5. Check the readouts — resting should be 0%, fully pressed 100%.
+4. Back on **Calibration**, take your foot off the pedal and click **MIN**,
+   then press it fully and click **MAX**. The bar shows calibrated output, so
+   it should drop to empty and fill completely as you do.
+   *Or* click **LEARN**, work the pedal through its travel a couple of times,
+   and click **STOP**. Each pedal learns on its own — the others are untouched.
+5. Check the readout — resting should be 0.0%, fully pressed 100.0%.
 6. Click **Save** to write it to the board's EEPROM.
-
-Everything is in percentages of pedal travel: "rest at 12%, full at 86%" rather
-than raw sensor counts. The app converts to whatever the hardware wants.
 
 A tip on brakes: don't set Full at the absolute hardest you can press. Set it
 where you want 100% braking to happen, which is usually a bit before the pedal
 physically stops.
 
-### Response curves
+### Smoothing
 
-Open **Advanced** on any pedal for a **Linearity** slider and a live graph of
-the response, with your current pedal position marked on it.
+Each pedal has a **SMOOTH** toggle. It's on by default and filters the wander a
+cheap potentiometer produces when nothing is touching it. The filter switches
+itself off the instant the pedal genuinely moves, so it costs no
+responsiveness where you would feel it — turn it off if you have a clean
+sensor and want the rawest possible signal.
+
+### Response curves and deadzone
+
+Open **Advanced** on any pedal for a **Linearity** slider, a **Deadzone**
+slider, a live graph of the response with your current position marked on it,
+and a **Show raw value** toggle that puts the raw sensor number next to the
+percentage.
 
 - **Left of centre** — more output for the same travel. The pedal reacts sooner
   and feels sharper. Useful for a throttle with a long, lazy first half.
@@ -197,10 +203,14 @@ the response, with your current pedal position marked on it.
 - **Right of centre** — less output early, so the first part of the travel is
   gentler and part-throttle or trail-braking is easier to hold steady.
 
-The curve lives on the board along with the calibration, so it applies in game
-whether or not this app is running. The graph on screen is drawn with the same
-integer arithmetic the firmware uses, so it isn't an approximation of what the
-board does — it's the same calculation.
+**Deadzone** ignores the first few percent of travel — useful if the pedal
+doesn't quite return to the same place every time. What's left is stretched
+back out, so a deadzone never costs you anything at the top.
+
+Both live on the board along with the calibration, so they apply in game
+whether or not this app is running. The graph is drawn from the same
+arithmetic the firmware uses, cross-checked across the full input range for
+every combination of curve and deadzone.
 
 ### What the meter shows
 
@@ -214,12 +224,18 @@ actually see — 0% with your foot off, 100% at the floor.
 
 Everything that isn't calibration lives on the **Settings** tab:
 
-- **Device** — pick the COM port, refresh the list, connect and disconnect. The
-  last port that connected is remembered and reconnected automatically next
-  launch. This card also reports whether game controller output is live.
+- **Device** — pick the COM port for your pedals, refresh the list, connect and
+  disconnect. The last port that connected is remembered and reconnected
+  automatically next launch, and the card reports whether game controller
+  output is live. There are also **Handbrake** and **Shifter** dropdowns:
+  nothing reads them yet, they're there so the layout doesn't move when that
+  support lands and so a choice made now is waiting for it.
 - **Pedals connected** — switch off anything you haven't wired. Disabled pedals
   vanish from the calibration tab and read a flat zero on the board.
-- **Interface** — dark or light, twelve accent swatches, and a **Custom** field
+- **Interface** — a **Refresh** rate (30 to 240 fps; the board is asked to
+  stream at the same rate, so a faster display really is fresher data rather
+  than the same reading redrawn), dark or light, twelve accent swatches, and a
+  **Custom** field
   that takes a colour however you have it: `#22d3ee`, `22d3ee`, `34, 211, 238`
   or `rgb(34, 211, 238)`. Plus **Always on top**, so the window stays visible
   over a running game while you tune.

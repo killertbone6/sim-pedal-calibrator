@@ -11,6 +11,9 @@ PC  ->  device
     EN <axis> <0|1>         mark an axis as unused / in use
     CURVE <axis> <-100..100>  response curve; 0 is linear, negative gives more
                             output early, positive softens the first half
+    DZ <axis> <0..30>       deadzone, as a percentage of travel above rest
+    SM <axis> <0|1>         noise filtering on / off for one axis
+    RATE <hz>               how often to stream D frames, 1..200
     SAVE                    write the current calibration to EEPROM
     LOAD                    re-read the calibration from EEPROM
     STREAM <0|1>            turn the live value stream off / on
@@ -23,6 +26,8 @@ device -> PC
     C <min0> <max0> ... <max2>  the current calibration (reply to GET / LOAD)
     E <en0> <en1> <en2>         which axes are in use (reply to GET / LOAD)
     L <lin0> <lin1> <lin2>      response curve per axis (reply to GET / LOAD)
+    Z <dz0> <dz1> <dz2>         deadzone per axis (reply to GET / LOAD)
+    M <sm0> <sm1> <sm2>         filtering per axis (reply to GET / LOAD)
     OK                          command accepted
     ERR <reason>                command rejected
 """
@@ -33,7 +38,7 @@ from dataclasses import dataclass
 
 BAUD = 115200
 FIRMWARE_ID = "PEDALCAL"
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 
 AXIS_NAMES = ("Throttle", "Brake", "Clutch")
 NUM_AXES = len(AXIS_NAMES)
@@ -45,12 +50,8 @@ ADC_MAX = 1023
 #: the same pedal travel (twitchier), positive gives less (gentler).
 CURVE_MAX = 100
 
-#: The curve is evaluated through a small lookup table with linear
-#: interpolation between points, because an 8-bit micro should not be running
-#: pow() a few hundred times a second. The app uses exactly the same table and
-#: the same integer arithmetic, so what you see really is what the board does.
-CURVE_POINTS = 17
-CURVE_SHIFT = 6          # ADC_MAX >> 6 == 15, giving 16 segments
+#: Deadzone is a percentage of travel ignored just off the rest position.
+DEADZONE_MAX = 30
 
 
 # --------------------------------------------------------------------------
@@ -124,6 +125,28 @@ class Linearity:
 
 
 @dataclass(frozen=True)
+class Deadzone:
+    """Travel ignored just off rest, as a percentage, per axis."""
+
+    axes: tuple[int, ...]
+
+    @staticmethod
+    def none() -> "Deadzone":
+        return Deadzone(tuple(0 for _ in range(NUM_AXES)))
+
+
+@dataclass(frozen=True)
+class Smoothing:
+    """Whether the noise filter is on, per axis."""
+
+    axes: tuple[bool, ...]
+
+    @staticmethod
+    def all_on() -> "Smoothing":
+        return Smoothing(tuple(True for _ in range(NUM_AXES)))
+
+
+@dataclass(frozen=True)
 class Ack:
     """``OK`` or ``ERR <reason>``."""
 
@@ -138,7 +161,8 @@ class Unknown:
     text: str
 
 
-Message = Ident | Data | Calibration | Enabled | Linearity | Ack | Unknown
+Message = (Ident | Data | Calibration | Enabled | Linearity | Deadzone
+           | Smoothing | Ack | Unknown)
 
 
 def parse_line(line: str) -> Message:
@@ -174,6 +198,13 @@ def parse_line(line: str) -> Message:
         if tag == "L" and len(parts) == NUM_AXES + 1:
             return Linearity(tuple(
                 max(-CURVE_MAX, min(CURVE_MAX, int(p))) for p in parts[1:]))
+
+        if tag == "Z" and len(parts) == NUM_AXES + 1:
+            return Deadzone(tuple(
+                max(0, min(DEADZONE_MAX, int(p))) for p in parts[1:]))
+
+        if tag == "M" and len(parts) == NUM_AXES + 1:
+            return Smoothing(tuple(p != "0" for p in parts[1:]))
 
         if tag == "OK":
             return Ack(True)
@@ -226,6 +257,26 @@ def cmd_curve(axis: int, linearity: int) -> str:
     return f"CURVE {axis} {linearity}"
 
 
+def cmd_deadzone(axis: int, percent: int) -> str:
+    if not 0 <= axis < NUM_AXES:
+        raise ValueError(f"axis must be 0..{NUM_AXES - 1}, got {axis}")
+    if not 0 <= percent <= DEADZONE_MAX:
+        raise ValueError(f"deadzone must be 0..{DEADZONE_MAX}, got {percent}")
+    return f"DZ {axis} {percent}"
+
+
+def cmd_smoothing(axis: int, on: bool) -> str:
+    if not 0 <= axis < NUM_AXES:
+        raise ValueError(f"axis must be 0..{NUM_AXES - 1}, got {axis}")
+    return f"SM {axis} {1 if on else 0}"
+
+
+def cmd_rate(hz: int) -> str:
+    if not 1 <= hz <= 200:
+        raise ValueError(f"stream rate must be 1..200 Hz, got {hz}")
+    return f"RATE {hz}"
+
+
 def cmd_save() -> str:
     return "SAVE"
 
@@ -274,30 +325,80 @@ def curve_gamma(linearity: int) -> float:
     return 2.0 ** (max(-CURVE_MAX, min(CURVE_MAX, int(linearity))) / 50.0)
 
 
-def curve_table(linearity: int) -> list[int]:
-    """The lookup table the firmware builds when the curve changes."""
-    gamma = curve_gamma(linearity)
-    return [round(ADC_MAX * (i / (CURVE_POINTS - 1)) ** gamma)
-            for i in range(CURVE_POINTS)]
-
-
 def apply_curve(value: int, linearity: int) -> int:
-    """Shape an already-calibrated 0..ADC_MAX value. Integer maths on purpose."""
+    """Shape an already-calibrated 0..ADC_MAX value.
+
+    This was a lookup table with interpolation, on the reasoning that an 8-bit
+    micro shouldn't run pow() a few hundred times a second. Measuring it
+    settled the argument: at the extremes the curve is near-vertical off the
+    bottom - the gradient of x**0.25 is infinite at zero - so a table with
+    evenly spaced points was out by as much as 20% in the first segment, and
+    no sane number of points fixes that, because the error only shrinks with
+    the fourth root of the point count. Those errors were also what made the
+    drawn line look notched.
+
+    A 16 MHz AVR gets through pow() in a couple of hundred microseconds, so
+    three of them per 5 ms tick costs low single-digit percent of the loop.
+    Exactness is worth far more than those cycles.
+    """
     value = max(0, min(ADC_MAX, value))
     if linearity == 0:
         return value
-    table = curve_table(linearity)
-    index = value >> CURVE_SHIFT
-    if index >= CURVE_POINTS - 1:
-        return table[-1]
-    frac = value & ((1 << CURVE_SHIFT) - 1)
-    low, high = table[index], table[index + 1]
-    return low + (((high - low) * frac) >> CURVE_SHIFT)
+    # int(x + 0.5), not round(): round() is banker's rounding in Python and
+    # would disagree with the firmware's C cast on exact halves.
+    return int(ADC_MAX * (value / ADC_MAX) ** curve_gamma(linearity) + 0.5)
 
 
-def pedal_output(raw: int, lo: int, hi: int, linearity: int = 0) -> float:
-    """The whole chain - calibrate, then shape - as a 0.0-1.0 fraction.
+def apply_calibration(raw: int, lo: int, hi: int) -> int:
+    """Map a raw reading onto 0..ADC_MAX using the calibration points.
 
-    This is what the game receives, so it's also what the app should show.
+    Written as integer arithmetic that the firmware mirrors exactly, rather
+    than a float version that merely agrees to within a count. The difference
+    is not academic: a curve at its extreme setting has an almost vertical
+    gradient just off zero, so one count of disagreement here came out as
+    sixteen counts of disagreement in the output.
     """
-    return apply_curve(round(scale(raw, lo, hi) * ADC_MAX), linearity) / ADC_MAX
+    if hi <= lo or raw <= lo:
+        return 0
+    if raw >= hi:
+        return ADC_MAX
+    span = hi - lo
+    return ((raw - lo) * ADC_MAX + span // 2) // span
+
+
+def apply_deadzone(value: int, deadzone: int) -> int:
+    """Ignore the first few percent of travel, then stretch what's left.
+
+    Rescaling matters: without it a 5% deadzone would also cost you 5% off the
+    top, and the pedal would never reach 100%.
+    """
+    if deadzone <= 0:
+        return value
+    threshold = (max(0, min(DEADZONE_MAX, deadzone)) * ADC_MAX) // 100
+    if value <= threshold:
+        return 0
+    span = ADC_MAX - threshold
+    return min(ADC_MAX, ((value - threshold) * ADC_MAX + span // 2) // span)
+
+
+def pedal_output(raw: int, lo: int, hi: int, linearity: int = 0,
+                 deadzone: int = 0) -> float:
+    """The whole chain - calibrate, deadzone, then shape - as 0.0-1.0.
+
+    This is what the game receives, so it's also what the app shows. The
+    firmware performs these three steps in exactly this order.
+    """
+    value = apply_calibration(raw, lo, hi)
+    value = apply_deadzone(value, deadzone)
+    return apply_curve(value, linearity) / ADC_MAX
+
+
+def curve_ideal(fraction: float, linearity: int) -> float:
+    """The smooth curve the lookup table approximates, for drawing.
+
+    The table is what the board evaluates and it is accurate to a fraction of
+    a percent, but plotting it directly puts a visible kink at every table
+    point. Drawing the underlying function instead gives a clean line that
+    still describes what the hardware does.
+    """
+    return max(0.0, min(1.0, fraction)) ** curve_gamma(linearity)

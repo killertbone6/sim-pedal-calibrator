@@ -13,12 +13,15 @@ Raw values are 10-bit, so `0`–`1023`.
 | Command | Meaning | Reply |
 |---|---|---|
 | `ID?` | Who is there? | `PEDALCAL <version>` |
-| `GET` | Report calibration, axis state and curves | `C ...`, `E ...`, `L ...` |
+| `GET` | Report the whole configuration | `C ...`, `E ...`, `L ...`, `Z ...`, `M ...` |
 | `SET <axis> <min> <max>` | Set one axis, applied immediately (not saved) | `OK` / `ERR ...` |
 | `EN <axis> <0\|1>` | Mark an axis as unused / in use | `OK` / `ERR ...` |
 | `CURVE <axis> <-100..100>` | Response curve; 0 is linear | `OK` / `ERR ...` |
+| `DZ <axis> <0..30>` | Deadzone, percent of travel above rest | `OK` / `ERR ...` |
+| `SM <axis> <0\|1>` | Noise filtering on / off for one axis | `OK` / `ERR ...` |
+| `RATE <hz>` | How often to stream `D` frames, 1-200 | `OK` / `ERR ...` |
 | `SAVE` | Write current calibration to EEPROM | `OK` |
-| `LOAD` | Re-read everything from EEPROM | `C ...`, `E ...`, `L ...` |
+| `LOAD` | Re-read everything from EEPROM | `C ...`, `E ...`, `L ...`, `Z ...`, `M ...` |
 | `STREAM <0\|1>` | Stop / start the live value stream | `OK` |
 
 ## Device → app
@@ -30,6 +33,8 @@ Raw values are 10-bit, so `0`–`1023`.
 | `C <min0> <max0> <min1> <max1> <min2> <max2>` | Current calibration |
 | `E <en0> <en1> <en2>` | Which axes are in use; a disabled axis streams a hard `0` |
 | `L <lin0> <lin1> <lin2>` | Response curve per axis, -100 to +100 |
+| `Z <dz0> <dz1> <dz2>` | Deadzone per axis, percent |
+| `M <sm0> <sm1> <sm2>` | Noise filtering per axis |
 | `OK` | Command accepted |
 | `ERR <reason>` | Command rejected (`axis`, `range`, `unknown_command`) |
 
@@ -37,7 +42,7 @@ Raw values are 10-bit, so `0`–`1023`.
 
 ```
 >  ID?
-<  PEDALCAL 4
+<  PEDALCAL 5
 <  D 118 205 101
 <  D 340 205 101
 >  SET 0 120 880
@@ -75,19 +80,32 @@ input ends up echoing the brake next door. The firmware handles this two ways:
 
 That is why the app asks which pedals you actually wired up.
 
-## The response curve
+## The processing chain
 
-`CURVE <axis> <n>` shapes an axis after calibration. `n` runs from -100 to
-+100, where 0 is a straight line, negative gives more output for the same
-travel (quicker, more sensitive) and positive gives less (gentler, easier to
-hold part-way). The exponent is `2 ^ (n / 50)`, so -50 is a square root and
-+50 is a square.
+Three steps, in this order, on both sides:
 
-The firmware doesn't call `pow()` per sample. When the curve changes it builds
-a 17-point lookup table once and interpolates between the points with a 6-bit
-fraction. The desktop app runs byte-identical integer arithmetic in
-`protocol.apply_curve()`, verified across the whole input range, so the curve
-drawn on screen is exactly what the board applies.
+1. **Calibration** — `apply_calibration()`: raw sensor value mapped onto
+   0-1023 between the stored min and max.
+2. **Deadzone** — `apply_deadzone()`: anything below the threshold reads 0,
+   and what remains is stretched back out so full travel still reaches 100%.
+3. **Curve** — `apply_curve()`: `output = input ^ (2 ^ (n / 50))`, so -50 is a
+   square root and +50 is a square.
+
+Every step is integer arithmetic, written the same way in the sketch and in
+`pedalcal/protocol.py`, and cross-checked over the full input range for every
+combination of curve and deadzone. That matters more than it sounds: an early
+version truncated in the calibration step where the app rounded, and although
+that is a single count, the curve at its extreme setting has a nearly vertical
+gradient off the bottom and multiplied it into **sixteen** counts of
+disagreement between the graph and the hardware.
+
+The curve is computed directly rather than through a lookup table. A table
+with evenly spaced points was out by up to 20% in its first segment for the
+same reason - the gradient of `x^0.25` is infinite at zero - and the error
+only falls with the fourth root of the point count, so no practical table size
+fixes it. Those errors also showed up as visible notches in the drawn curve.
+`pow()` on a 16 MHz AVR costs a couple of hundred microseconds; three per
+5 ms tick is a small price for being exact.
 
 ## Streaming and blocking
 

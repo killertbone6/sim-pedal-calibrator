@@ -24,7 +24,9 @@ from .icon_data import ICON_PNG_B64
 #: .exe (which has no console to print to) still leaves something to read.
 LOG_FILE = Path.home() / "pedalcal.log"
 
-POLL_MS = 25   # how often the UI drains the serial queue
+#: Refresh rates offered in Settings. The board streams at the same rate, so
+#: the number is real rather than the UI redrawing stale data faster.
+FPS_CHOICES = (30, 60, 120, 240)
 PAD = 14       # outer window padding
 
 
@@ -38,28 +40,28 @@ def write_log(text: str) -> None:
 
 
 class AxisPanel(W.Card):
-    """One pedal: live output, meter, calibration points and response curve.
+    """One pedal: live output, calibration points, curve and deadzone.
 
-    Everything the user sees and types is a percentage of the pedal's travel.
-    Raw ADC counts still go over the wire because that's what the firmware
-    speaks, but they never reach the screen.
+    The bar shows calibrated output rather than raw sensor position, so
+    pressing MIN with your foot off empties it and pressing MAX at the floor
+    fills it. Raw counts still travel over the wire - the firmware works in
+    them - but they only reach the screen if you ask for them.
     """
 
-    CURVE_SAMPLES = 32
+    CURVE_SAMPLES = 96
 
     def __init__(self, master, index: int, name: str, palette: T.Palette,
-                 on_change, on_curve, on_curve_commit, on_learn) -> None:
+                 hooks: dict) -> None:
         super().__init__(master, palette)
         self.index = index
         self.name = name
-        self._on_change = on_change
-        self._on_curve = on_curve
-        self._on_curve_commit = on_curve_commit
-        self._on_learn = on_learn
+        self.hooks = hooks
         self.raw = 0
+        self.lo = 0
+        self.hi = P.ADC_MAX
         self.linearity = 0
-        self.min_var = tk.StringVar(value="0")
-        self.max_var = tk.StringVar(value="100")
+        self.deadzone = 0
+        self.show_raw = False
         self.themed: list[W.Themed] = []
         self.plain: list[tuple[tk.Widget, dict]] = []
 
@@ -73,25 +75,39 @@ class AxisPanel(W.Card):
         self.title.pack(side="left")
         self._reg(self.title, bg="surface", fg="text_dim")
 
-        self.pct_label = tk.Label(header, text="0%", font=W.mono(19, "bold"),
-                                  width=5, anchor="e", bg=palette.surface,
+        self.pct_label = tk.Label(header, text="0.0%", font=W.mono(19, "bold"),
+                                  width=7, anchor="e", bg=palette.surface,
                                   fg=palette.accent)
         self.pct_label.pack(side="right")
         self._reg(self.pct_label, bg="surface", fg="accent")
+
+        self.raw_label = tk.Label(header, text="", font=W.mono(13), width=6,
+                                  anchor="e", bg=palette.surface,
+                                  fg=palette.text_dim)
+        self.raw_label.pack(side="right", padx=(0, 12))
+        self._reg(self.raw_label, bg="surface", fg="text_dim")
 
         self.meter = W.Meter(body, palette)
         self.meter.grid(row=1, column=0, sticky="ew", pady=(10, 12))
         self.themed.append(self.meter)
 
-        fields = self._row(body, 2)
-        self._build_field(fields, "REST", self.min_var)
-        self._build_field(fields, "FULL", self.max_var, padx=(24, 0))
-        self.learn_btn = W.HudButton(fields, "learn", self._learn, palette,
-                                     height=30, pad=12,
-                                     fits=["stop", "learn"])
-        self.learn_btn.configure(bg=palette.surface)
-        self.learn_btn.pack(side="right")
-        self.themed.append(self.learn_btn)
+        controls = self._row(body, 2)
+        for label, handler, fits in (("min", self._set_min, None),
+                                     ("max", self._set_max, None),
+                                     ("learn", self._learn, ["stop"])):
+            button = W.HudButton(controls, label, handler, palette, height=30,
+                                 pad=14, fits=fits)
+            button.configure(bg=palette.surface)
+            button.pack(side="left", padx=(0 if label == "min" else 8, 0))
+            self.themed.append(button)
+            if label == "learn":
+                self.learn_btn = button
+
+        self.smooth_toggle = W.Toggle(controls, "smooth", True,
+                                      self._smoothing_changed, palette)
+        self.smooth_toggle.configure(bg=palette.surface)
+        self.smooth_toggle.pack(side="right")
+        self.themed.append(self.smooth_toggle)
 
         self.advanced = W.Disclosure(body, "advanced", False,
                                      self._toggle_advanced, palette)
@@ -100,9 +116,6 @@ class AxisPanel(W.Card):
         self.themed.append(self.advanced)
 
         self._build_advanced(body)
-
-        for var in (self.min_var, self.max_var):
-            var.trace_add("write", lambda *_: self.redraw_meter())
 
     # -- construction helpers --------------------------------------------
 
@@ -115,32 +128,28 @@ class AxisPanel(W.Card):
         self._reg(frame, bg="surface")
         return frame
 
-    def _build_field(self, parent, label: str, var: tk.StringVar,
-                     padx=(0, 0)) -> None:
-        holder = tk.Frame(parent, bg=self.p.surface)
-        holder.pack(side="left", padx=padx)
-        self._reg(holder, bg="surface")
+    def _labelled_slider(self, parent, label: str, minimum: int, maximum: int,
+                         on_drag, on_commit, suffix: str = ""):
+        row = tk.Frame(parent, bg=self.p.surface)
+        row.pack(fill="x", pady=(10, 0))
+        self._reg(row, bg="surface")
 
-        caption = tk.Label(holder, text=W.spaced(label), font=W.ui(8, "bold"),
+        caption = tk.Label(row, text=W.spaced(label), font=W.ui(8, "bold"),
                            bg=self.p.surface, fg=self.p.text_dim)
-        caption.pack(side="left", padx=(0, 8))
+        caption.pack(side="left", padx=(0, 10))
         self._reg(caption, bg="surface", fg="text_dim")
 
-        entry = W.HudEntry(holder, var, self.p, width=58)
-        entry.configure(bg=self.p.surface)
-        entry.pack(side="left")
-        self.themed.append(entry)
+        slider = W.Slider(row, self.p, minimum, maximum, 0, command=on_drag)
+        slider.on_release = on_commit
+        slider.configure(bg=self.p.surface)
+        slider.pack(side="left")
+        self.themed.append(slider)
 
-        unit = tk.Label(holder, text="%", font=W.mono(10), bg=self.p.surface,
-                        fg=self.p.text_dim)
-        unit.pack(side="left", padx=(3, 0))
-        self._reg(unit, bg="surface", fg="text_dim")
-
-        button = W.HudButton(holder, "set", lambda: self._capture(var), self.p,
-                             height=30, pad=12)
-        button.configure(bg=self.p.surface)
-        button.pack(side="left", padx=(8, 0))
-        self.themed.append(button)
+        value = tk.Label(row, text="0" + suffix, font=W.mono(11), width=6,
+                         anchor="e", bg=self.p.surface, fg=self.p.text)
+        value.pack(side="left", padx=(8, 0))
+        self._reg(value, bg="surface", fg="text")
+        return row, slider, value
 
     def _build_advanced(self, body) -> None:
         panel = tk.Frame(body, bg=self.p.surface)
@@ -148,30 +157,9 @@ class AxisPanel(W.Card):
         self.advanced_panel = panel
         self.advanced_row = 4
 
-        row = tk.Frame(panel, bg=self.p.surface)
-        row.pack(fill="x", pady=(10, 6))
-        self._reg(row, bg="surface")
-
-        caption = tk.Label(row, text=W.spaced("LINEARITY"),
-                           font=W.ui(8, "bold"), bg=self.p.surface,
-                           fg=self.p.text_dim)
-        caption.pack(side="left", padx=(0, 10))
-        self._reg(caption, bg="surface", fg="text_dim")
-
-        self.curve_slider = W.Slider(
-            panel, self.p, -P.CURVE_MAX, P.CURVE_MAX, 0,
-            command=self._curve_dragged)
-        self.curve_slider.on_release = self._curve_committed
-        self.curve_slider.configure(bg=self.p.surface)
-        self.curve_slider.pack(in_=row, side="left")
-        self.themed.append(self.curve_slider)
-
-        self.curve_label = tk.Label(row, text="0", font=W.mono(11), width=5,
-                                    anchor="e", bg=self.p.surface,
-                                    fg=self.p.text)
-        self.curve_label.pack(side="left", padx=(8, 0))
-        self._reg(self.curve_label, bg="surface", fg="text")
-
+        row, self.curve_slider, self.curve_label = self._labelled_slider(
+            panel, "LINEARITY", -P.CURVE_MAX, P.CURVE_MAX,
+            self._curve_dragged, self._curve_committed)
         reset = W.HudButton(row, "linear", self._reset_curve, self.p,
                             height=28, pad=10)
         reset.configure(bg=self.p.surface)
@@ -179,16 +167,26 @@ class AxisPanel(W.Card):
         self.themed.append(reset)
 
         self.graph = W.CurveGraph(panel, self.p)
-        self.graph.pack(fill="x")
+        self.graph.pack(fill="x", pady=(8, 0))
         self.themed.append(self.graph)
+
+        _row, self.dz_slider, self.dz_label = self._labelled_slider(
+            panel, "DEADZONE", 0, P.DEADZONE_MAX,
+            self._deadzone_dragged, self._deadzone_committed, suffix="%")
+
+        self.raw_toggle = W.Toggle(panel, "show raw value", False,
+                                   self._show_raw_changed, self.p)
+        self.raw_toggle.configure(bg=self.p.surface)
+        self.raw_toggle.pack(anchor="w", pady=(12, 0))
+        self.themed.append(self.raw_toggle)
 
         hint = tk.Label(
             panel, justify="left", anchor="w", font=W.ui(8),
             bg=self.p.surface, fg=self.p.text_dim,
-            text="left of centre reacts sooner and is more sensitive; "
-                 "right of centre\nis gentler off the top and easier to "
-                 "hold part-way")
-        hint.pack(anchor="w", pady=(6, 0))
+            text="linearity left of centre reacts sooner and is more "
+                 "sensitive; right of\ncentre is gentler off the top. "
+                 "deadzone ignores the first part of travel")
+        hint.pack(anchor="w", pady=(8, 0))
         self._reg(hint, bg="surface", fg="text_dim")
         self._refresh_curve()
 
@@ -206,81 +204,130 @@ class AxisPanel(W.Card):
         """Live while dragging: redraw locally, don't flood the serial link."""
         self.linearity = int(value)
         self._refresh_curve()
-        if self._on_curve is not None:
-            self._on_curve(self.index, self.linearity)
+        self._call("curve_preview", self.index, self.linearity)
 
     def _curve_committed(self, value: int) -> None:
-        if self._on_curve_commit is not None:
-            self._on_curve_commit(self.index, int(value))
+        self._call("curve_commit", self.index, int(value))
 
     def _reset_curve(self) -> None:
         self.set_linearity(0)
         self._curve_committed(0)
 
+    def _deadzone_dragged(self, value: int) -> None:
+        self.deadzone = int(value)
+        self.dz_label.config(text=f"{self.deadzone}%")
+        self._refresh_curve()
+
+    def _deadzone_committed(self, value: int) -> None:
+        self._call("deadzone_commit", self.index, int(value))
+
+    def _show_raw_changed(self, value: bool) -> None:
+        self.show_raw = value
+        self._refresh_raw_label()
+        self._call("show_raw", self.index, value)
+
+    def _smoothing_changed(self, value: bool) -> None:
+        self._call("smoothing", self.index, value)
+
+    def _call(self, hook: str, *args) -> None:
+        handler = self.hooks.get(hook)
+        if handler is not None:
+            handler(*args)
+
+    def _refresh_raw_label(self) -> None:
+        self.raw_label.config(text=f"{self.raw:04d}" if self.show_raw else "")
+
     def _refresh_curve(self) -> None:
-        self.curve_label.config(text=f"{self.linearity:+d}"
-                                     if self.linearity else "0")
+        self.curve_label.config(
+            text=f"{self.linearity:+d}" if self.linearity else "0")
+        self.dz_label.config(text=f"{self.deadzone}%")
         steps = self.CURVE_SAMPLES
-        self.graph.set_curve([
-            (i / steps,
-             P.apply_curve(round(i / steps * P.ADC_MAX), self.linearity)
-             / P.ADC_MAX)
-            for i in range(steps + 1)
-        ])
+        # The smooth function, not the sampled output: plotting the discrete
+        # values put a visible kink at every step.
+        threshold = self.deadzone / 100
+        points = []
+        for i in range(steps + 1):
+            x = i / steps
+            if x <= threshold:
+                points.append((x, 0.0))
+                continue
+            stretched = (x - threshold) / (1 - threshold) if threshold < 1 else 0
+            points.append((x, P.curve_ideal(stretched, self.linearity)))
+        self.graph.set_curve(points)
+
+    # -- setters used by the app -----------------------------------------
 
     def set_linearity(self, value: int) -> None:
         self.linearity = max(-P.CURVE_MAX, min(P.CURVE_MAX, int(value)))
         self.curve_slider.set(self.linearity)
         self._refresh_curve()
 
-    # -- learning ---------------------------------------------------------
+    def set_deadzone(self, value: int) -> None:
+        self.deadzone = max(0, min(P.DEADZONE_MAX, int(value)))
+        self.dz_slider.set(self.deadzone)
+        self._refresh_curve()
+
+    def set_smoothing(self, value: bool) -> None:
+        self.smooth_toggle.set(bool(value))
+
+    def set_show_raw(self, value: bool) -> None:
+        self.show_raw = bool(value)
+        self.raw_toggle.set(self.show_raw)
+        self._refresh_raw_label()
+
+    # -- calibration ------------------------------------------------------
+
+    def limits(self) -> tuple[int, int]:
+        return self.lo, self.hi
+
+    def limits_pct(self) -> tuple[int, int]:
+        return P.raw_to_pct(self.lo), P.raw_to_pct(self.hi)
+
+    def set_limits(self, lo: int, hi: int) -> None:
+        self.lo = max(0, min(P.ADC_MAX, int(lo)))
+        self.hi = max(0, min(P.ADC_MAX, int(hi)))
+        self.update_raw(self.raw)
+
+    def _set_min(self) -> None:
+        if self.raw >= self.hi:
+            self._call("warn", f"{self.name}: rest has to be below full - "
+                               "set MAX at the floor first")
+            return
+        self.lo = self.raw
+        self.update_raw(self.raw)
+        self._call("limits", self.index)
+
+    def _set_max(self) -> None:
+        if self.raw <= self.lo:
+            self._call("warn", f"{self.name}: full has to be above rest - "
+                               "set MIN with your foot off first")
+            return
+        self.hi = self.raw
+        self.update_raw(self.raw)
+        self._call("limits", self.index)
 
     def _learn(self) -> None:
-        if self._on_learn is not None:
-            self._on_learn(self.index)
+        self._call("learn", self.index)
 
     def set_learning(self, learning: bool) -> None:
         self.learn_btn.set_text("stop" if learning else "learn")
         self.learn_btn.variant = "primary" if learning else "ghost"
         self.learn_btn.redraw()
 
-    # -- values ----------------------------------------------------------
-
-    def limits_pct(self) -> tuple[int, int]:
-        def as_pct(var: tk.StringVar, fallback: int) -> int:
-            try:
-                return max(0, min(100, int(float(var.get().strip().rstrip("%")))))
-            except ValueError:
-                return fallback
-
-        return as_pct(self.min_var, 0), as_pct(self.max_var, 100)
-
-    def limits(self) -> tuple[int, int]:
-        """The calibration in raw counts, which is what the firmware wants."""
-        lo_pct, hi_pct = self.limits_pct()
-        return P.pct_to_raw(lo_pct), P.pct_to_raw(hi_pct)
-
-    def set_limits(self, lo: int, hi: int) -> None:
-        """Takes raw counts (from the device) and shows them as percentages."""
-        self.min_var.set(str(P.raw_to_pct(lo)))
-        self.max_var.set(str(P.raw_to_pct(hi)))
-
-    def _capture(self, var: tk.StringVar) -> None:
-        var.set(str(P.raw_to_pct(self.raw)))
-        self._on_change()
+    # -- live values ------------------------------------------------------
 
     def update_raw(self, raw: int) -> None:
         self.raw = raw
-        lo, hi = self.limits()
-        output = P.pedal_output(raw, lo, hi, self.linearity)
-        self.pct_label.config(text=f"{output * 100:.0f}%")
-        self.meter.set_values(raw, lo, hi)
+        output = P.pedal_output(raw, self.lo, self.hi, self.linearity,
+                                self.deadzone)
+        self.pct_label.config(text=f"{output * 100:.1f}%")
+        self.meter.set_output(output)
+        self._refresh_raw_label()
         if self.advanced.open:
-            self.graph.set_position(P.scale(raw, lo, hi))
+            self.graph.set_position(P.scale(raw, self.lo, self.hi))
 
     def redraw_meter(self) -> None:
-        lo, hi = self.limits()
-        self.meter.set_values(self.raw, lo, hi)
+        self.update_raw(self.raw)
 
     # -- theming ---------------------------------------------------------
 
@@ -346,7 +393,7 @@ class CalibratorApp(tk.Frame):
             self._schedule(200,
                            lambda: self._begin_connect(self.cfg.last_port,
                                                        quiet=True))
-        self._schedule(POLL_MS, self._tick)
+        self._schedule(self._poll_ms(), self._tick)
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- small helpers ---------------------------------------------------
@@ -380,6 +427,9 @@ class CalibratorApp(tk.Frame):
         finally:
             if was_on_top and self._alive:
                 self.master.attributes("-topmost", True)
+
+    def _poll_ms(self) -> int:
+        return max(4, round(1000 / max(15, self.cfg.fps)))
 
     # -- timers ----------------------------------------------------------
 
@@ -475,13 +525,23 @@ class CalibratorApp(tk.Frame):
         self._reg(page, bg="bg")
         self.calibration_page = page
 
-        self.panels = [
-            AxisPanel(page, i, name, self.p, self.apply_calibration,
-                      self._curve_preview, self._curve_commit, self.toggle_learn)
-            for i, name in enumerate(P.AXIS_NAMES)
-        ]
-        for panel, linearity in zip(self.panels, self.cfg.curves):
-            panel.set_linearity(linearity)
+        hooks = {
+            "limits": self._limits_changed,
+            "learn": self.toggle_learn,
+            "curve_preview": self._curve_preview,
+            "curve_commit": self._curve_commit,
+            "deadzone_commit": self._deadzone_commit,
+            "smoothing": self._smoothing_commit,
+            "show_raw": self._show_raw_changed,
+            "warn": self._set_status,
+        }
+        self.panels = [AxisPanel(page, i, name, self.p, hooks)
+                       for i, name in enumerate(P.AXIS_NAMES)]
+        for panel in self.panels:
+            panel.set_linearity(self.cfg.curves[panel.index])
+            panel.set_deadzone(self.cfg.deadzones[panel.index])
+            panel.set_smoothing(self.cfg.smoothing[panel.index])
+            panel.set_show_raw(self.cfg.show_raw[panel.index])
             panel.fit()
             self.themed.append(panel)
 
@@ -522,6 +582,12 @@ class CalibratorApp(tk.Frame):
         row.pack(fill="x")
         self._reg(row, bg="surface")
 
+        pedals_caption = tk.Label(row, text=W.spaced("PEDALS"),
+                                  font=W.ui(8, "bold"), width=11, anchor="w",
+                                  bg=self.p.surface, fg=self.p.text_dim)
+        pedals_caption.pack(side="left", padx=(0, 8))
+        self._reg(pedals_caption, bg="surface", fg="text_dim")
+
         # Pack the fixed-width buttons first: a dropdown packed with expand=True
         # ahead of them would swallow the row and clip their labels.
         self.connect_btn = W.HudButton(row, "connect", self.toggle_connection,
@@ -549,6 +615,35 @@ class CalibratorApp(tk.Frame):
         self._reg(self.hid_label, bg="surface")
         self.hid = None
         self._set_hid_label()
+
+        # Nothing reads these yet - they're here so the layout doesn't have to
+        # be rearranged when handbrake and shifter support lands, and so a
+        # choice made now survives until then.
+        self.extra_selects: dict[str, W.HudSelect] = {}
+        for key, label in (("handbrake", "HANDBRAKE"), ("shifter", "SHIFTER")):
+            extra = tk.Frame(card.body, bg=self.p.surface)
+            extra.pack(fill="x", pady=(8, 0))
+            self._reg(extra, bg="surface")
+            caption = tk.Label(extra, text=W.spaced(label), width=11,
+                               anchor="w", font=W.ui(8, "bold"),
+                               bg=self.p.surface, fg=self.p.text_dim)
+            caption.pack(side="left", padx=(0, 8))
+            self._reg(caption, bg="surface", fg="text_dim")
+            select = W.HudSelect(
+                extra, self.p, width=120,
+                on_change=lambda i, k=key: self._set_extra_port(k, i))
+            select.configure(bg=self.p.surface)
+            select.pack(side="left", fill="x", expand=True)
+            self.themed.append(select)
+            self.extra_selects[key] = select
+
+        pending = tk.Label(card.body, justify="left", anchor="w", font=W.ui(8),
+                           bg=self.p.surface, fg=self.p.text_dim,
+                           text="handbrake and shifter aren't wired up yet - "
+                                "pick them now if you like\nand the choice "
+                                "will be waiting when they are")
+        pending.pack(anchor="w", pady=(10, 0))
+        self._reg(pending, bg="surface", fg="text_dim")
         card.fit()
         self.device_card = card
 
@@ -631,6 +726,24 @@ class CalibratorApp(tk.Frame):
             font=W.ui(8), bg=self.p.surface, fg=self.p.text_dim)
         self.custom_hint.pack(anchor="w", pady=(6, 0))
         self._reg(self.custom_hint, bg="surface", fg="text_dim")
+
+        fps_row = tk.Frame(card.body, bg=self.p.surface)
+        fps_row.pack(anchor="w", fill="x", pady=(14, 0))
+        self._reg(fps_row, bg="surface")
+        fps_caption = tk.Label(fps_row, text=W.spaced("REFRESH"),
+                               font=W.ui(8, "bold"), bg=self.p.surface,
+                               fg=self.p.text_dim)
+        fps_caption.pack(side="left", padx=(0, 10))
+        self._reg(fps_caption, bg="surface", fg="text_dim")
+
+        self.fps_tabs = W.Tabs(fps_row, [f"{f} fps" for f in FPS_CHOICES],
+                               self.p, on_change=self._fps_chosen, height=28)
+        self.fps_tabs.configure(bg=self.p.surface)
+        self.fps_tabs.active = (FPS_CHOICES.index(self.cfg.fps)
+                                if self.cfg.fps in FPS_CHOICES else 1)
+        self.fps_tabs.redraw()
+        self.fps_tabs.pack(side="left")
+        self.themed.append(self.fps_tabs)
 
         self.on_top_toggle = W.Toggle(card.body, "always on top",
                                       self.cfg.on_top, self.set_on_top, self.p)
@@ -915,6 +1028,9 @@ class CalibratorApp(tk.Frame):
         for panel in self.panels:
             panel.set_limits(0, P.ADC_MAX)
             panel.set_linearity(0)
+            panel.set_deadzone(0)
+            panel.set_smoothing(True)
+            panel.set_show_raw(False)
         for toggle, value in zip(self.axis_toggles, defaults.axes):
             toggle.set(value)
         self.on_top_toggle.set(defaults.on_top)
@@ -958,7 +1074,13 @@ class CalibratorApp(tk.Frame):
                 if port.device == select:
                     target = i
                     break
-        self.port_select.set_values([str(p) for p in self.ports], target)
+        labels = [str(p) for p in self.ports]
+        self.port_select.set_values(labels, target)
+        for key, select in getattr(self, "extra_selects", {}).items():
+            saved = getattr(self.cfg, f"{key}_port", "")
+            chosen = next((i for i, p in enumerate(self.ports)
+                           if p.device == saved), 0)
+            select.set_values(labels, chosen)
 
     def _selected_port(self) -> str | None:
         idx = self.port_select.get()
@@ -1089,6 +1211,9 @@ class CalibratorApp(tk.Frame):
                 return
             self.device.send(P.cmd_set(panel.index, lo, hi))
             self.device.send(P.cmd_curve(panel.index, panel.linearity))
+            self.device.send(P.cmd_deadzone(panel.index, panel.deadzone))
+            self.device.send(P.cmd_smoothing(
+                panel.index, self.cfg.smoothing[panel.index]))
         self._set_status("Calibration applied (not yet saved)")
 
     def save_calibration(self) -> None:
@@ -1126,6 +1251,11 @@ class CalibratorApp(tk.Frame):
 
     # -- response curve ---------------------------------------------------
 
+    def _limits_changed(self, index: int) -> None:
+        self.apply_calibration()
+        lo, hi = self.panels[index].limits_pct()
+        self._set_status(f"{P.AXIS_NAMES[index]}: {lo}% - {hi}%")
+
     def _curve_preview(self, index: int, linearity: int) -> None:
         """Dragging the slider: remember it, but don't spam the serial link."""
         self.cfg.curves[index] = linearity
@@ -1142,6 +1272,48 @@ class CalibratorApp(tk.Frame):
         self._set_status(
             f"{P.AXIS_NAMES[index]} curve set to {linearity:+d}"
             if linearity else f"{P.AXIS_NAMES[index]} curve set to linear")
+
+    def _deadzone_commit(self, index: int, percent: int) -> None:
+        self.cfg.deadzones[index] = percent
+        S.save(self.cfg)
+        self._send(P.cmd_deadzone(index, percent))
+        self._set_status(f"{P.AXIS_NAMES[index]} deadzone {percent}%")
+
+    def _smoothing_commit(self, index: int, on: bool) -> None:
+        self.cfg.smoothing[index] = on
+        S.save(self.cfg)
+        self._send(P.cmd_smoothing(index, on))
+        self._set_status(f"{P.AXIS_NAMES[index]} smoothing "
+                         f"{'on' if on else 'off'}")
+
+    def _show_raw_changed(self, index: int, on: bool) -> None:
+        self.cfg.show_raw[index] = on
+        S.save(self.cfg)
+
+    def _send(self, command: str) -> None:
+        """Fire and forget - a write failing is logged, never fatal."""
+        if self.device is None:
+            return
+        try:
+            self.device.send(command)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"write failed: {exc}")
+
+    def _fps_chosen(self, index: int) -> None:
+        self.set_fps(FPS_CHOICES[index])
+
+    def _set_extra_port(self, key: str, index: int) -> None:
+        if 0 <= index < len(self.ports):
+            setattr(self.cfg, f"{key}_port", self.ports[index].device)
+            S.save(self.cfg)
+
+    def set_fps(self, fps: int) -> None:
+        self.cfg.fps = fps
+        S.save(self.cfg)
+        # Ask the board to match, so a faster display shows genuinely fresher
+        # data rather than redrawing the same reading more often.
+        self._send(P.cmd_rate(min(fps, 200)))
+        self._set_status(f"Display running at {fps} fps")
 
     # -- event loop ------------------------------------------------------
 
@@ -1164,7 +1336,7 @@ class CalibratorApp(tk.Frame):
                     self._handle(msg)
         except Exception:  # noqa: BLE001 - a bad frame must not kill the app
             write_log("error handling serial data:\n" + traceback.format_exc())
-        self._schedule(POLL_MS, self._tick)
+        self._schedule(self._poll_ms(), self._tick)
 
     def _handle(self, msg: P.Message) -> None:
         if isinstance(msg, P.Data):
@@ -1189,12 +1361,21 @@ class CalibratorApp(tk.Frame):
             self.log(f"identified: {P.FIRMWARE_ID} v{msg.version} "
                      f"({'hid' if msg.hid else 'nohid'})")
             self._push_axis_enables()
+            self._send(P.cmd_rate(min(self.cfg.fps, 200)))
         elif isinstance(msg, P.Calibration):
             for panel, (lo, hi) in zip(self.panels, msg.points):
                 panel.set_limits(lo, hi)
             self.log(f"calibration from device: {msg.points}")
         elif isinstance(msg, P.Enabled):
             self.log(f"device axis state: {msg.axes}")
+        elif isinstance(msg, P.Deadzone):
+            for panel, value in zip(self.panels, msg.axes):
+                panel.set_deadzone(value)
+                self.cfg.deadzones[panel.index] = value
+        elif isinstance(msg, P.Smoothing):
+            for panel, value in zip(self.panels, msg.axes):
+                panel.set_smoothing(value)
+                self.cfg.smoothing[panel.index] = value
         elif isinstance(msg, P.Linearity):
             for panel, linearity in zip(self.panels, msg.axes):
                 panel.set_linearity(linearity)

@@ -19,6 +19,7 @@ sys.path.insert(0, str(HERE))
 from fake_device import FakeSerial  # noqa: E402
 from pedalcal import gui  # noqa: E402
 from pedalcal import settings as S  # noqa: E402
+from pedalcal import protocol as P  # noqa: E402
 from pedalcal.device import PedalDevice, PortInfo  # noqa: E402
 
 FAKE_PORT = "COM_FAKE"
@@ -88,6 +89,58 @@ def check_main_flow(tmp: Path) -> None:
               "learning the brake disturbed the other pedals")
         check(not app.learning, "learning state not cleared")
 
+    def min_max_buttons():
+        """MIN/MAX capture the live position; the bar reads output, so
+        setting rest with the pedal where it is must empty it."""
+        panel = app.panels[0]
+        panel.set_limits(0, P.ADC_MAX)
+        panel._set_min()
+        check(panel.lo == panel.raw, "MIN did not capture the live position")
+        check(panel.meter.output < 0.02,
+              f"bar should drop to empty after MIN, got {panel.meter.output:.3f}")
+        check("%" in panel.pct_label.cget("text"), "percentage label missing")
+        check("." in panel.pct_label.cget("text"),
+              f"percentage has no decimal: {panel.pct_label.cget('text')!r}")
+        # setting full below rest must be refused rather than inverting the axis
+        before = panel.hi
+        panel.raw = max(0, panel.lo - 5)
+        panel._set_max()
+        check(panel.hi == before, "allowed full to be set below rest")
+
+    def raw_and_smoothing():
+        panel = app.panels[0]
+        panel.raw_toggle.toggle()
+        check(app.cfg.show_raw[0] is True, "raw toggle not stored")
+        check(panel.raw_label.cget("text").strip() != "",
+              "raw value not shown when enabled")
+        panel.raw_toggle.toggle()
+        check(panel.raw_label.cget("text").strip() == "",
+              "raw value still shown when disabled")
+        panel.smooth_toggle.toggle()
+        check(app.cfg.smoothing[0] is False, "smoothing toggle not stored")
+        panel.smooth_toggle.toggle()
+
+    def deadzone():
+        panel = app.panels[0]
+        panel._deadzone_dragged(20)
+        panel._deadzone_committed(20)
+        check(panel.deadzone == 20, "deadzone not applied")
+        check(app.cfg.deadzones[0] == 20, "deadzone not stored")
+        flat = [y for x, y in panel.graph.points if x < 0.19]
+        check(all(v == 0.0 for v in flat), "deadzone not visible on the graph")
+        check(abs(panel.graph.points[-1][1] - 1.0) < 0.02,
+              "deadzone stole travel from the top of the curve")
+        panel._deadzone_dragged(0)
+        panel._deadzone_committed(0)
+
+    def frame_rate():
+        for index, fps in enumerate(gui.FPS_CHOICES):
+            app._fps_chosen(index)
+            check(app.cfg.fps == fps, f"fps {fps} not stored")
+            check(app._poll_ms() == max(4, round(1000 / fps)),
+                  f"poll interval wrong for {fps} fps")
+        app._fps_chosen(1)
+
     def curves():
         panel = app.panels[0]
         panel.advanced.toggle()
@@ -104,7 +157,13 @@ def check_main_flow(tmp: Path) -> None:
         middle = points[len(points) // 2]
         check(middle[1] > middle[0],
               "negative linearity should give more output at half travel")
-        shoot(root, "v3_advanced")
+        # the reported notches: no step between neighbouring samples should be
+        # wildly bigger than its neighbours
+        steps = [b[1] - a[1] for a, b in zip(points, points[1:])]
+        jumps = [abs(b - a) for a, b in zip(steps, steps[1:])]
+        check(max(jumps) < 0.05,
+              f"curve has a visible kink, worst step change {max(jumps):.3f}")
+        shoot(root, "v4_advanced")
 
     def tray_toggles():
         """Tray is unavailable in this environment: the app must cope."""
@@ -198,6 +257,7 @@ def check_main_flow(tmp: Path) -> None:
         check(app.p.dark, "reset kept the light theme")
         check(app.panels[0].limits_pct() == (0, 100), "reset kept calibration")
         check(all(p.linearity == 0 for p in app.panels), "reset kept a curve")
+        check(all(p.deadzone == 0 for p in app.panels), "reset kept a deadzone")
         check(not app.cfg.console_open, "reset left the console open")
         shoot(root, "v2_after_reset")
 

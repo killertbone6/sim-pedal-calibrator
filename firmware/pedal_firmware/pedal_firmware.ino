@@ -68,12 +68,12 @@ static const uint8_t PEDAL_PIN[NUM_AXES] = { A0, A1, A2 };
   #endif
 #endif
 
-static const uint16_t PROTOCOL_VERSION = 4;
+static const uint16_t PROTOCOL_VERSION = 5;
 static const uint16_t ADC_MAX      = 1023;
 static const uint16_t HID_MS       = 5;   // 200 controller updates a second
-static const uint8_t  FRAMES_PER_STREAM = 4;   // serial telemetry at 50 Hz
+static uint8_t        framesPerStream = 4;    // serial telemetry at 50 Hz
 static const uint8_t  OVERSAMPLE   = 4;   // averaged reads per sample
-static const uint32_t EEPROM_MAGIC = 0x50444C33UL;  // "PDL3"
+static const uint32_t EEPROM_MAGIC = 0x50444C34UL;  // "PDL4"
 static const int      EEPROM_ADDR  = 0;
 
 // --- noise filtering ---------------------------------------------------
@@ -94,12 +94,17 @@ static const uint8_t  DEADBAND  = 4;
 static const uint16_t FAST_JUMP = 24;
 
 // --- response curve ----------------------------------------------------
-// Evaluated through a small lookup table with linear interpolation rather
-// than calling pow() a few hundred times a second. The table is rebuilt only
-// when the curve changes. The desktop app runs identical integer arithmetic,
-// so the number on screen is the number the game receives.
-#define CURVE_POINTS 17
-static const uint8_t CURVE_SHIFT = 6;    // ADC_MAX >> 6 == 15, so 16 segments
+// This used a lookup table with interpolation, to avoid calling pow() a few
+// hundred times a second. Measuring the error settled the argument against
+// it: the curve is near-vertical off the bottom at the extreme settings - the
+// gradient of x^0.25 is infinite at zero - so evenly spaced table points were
+// out by up to 20% in the first segment, and the error only falls with the
+// fourth root of the point count, so no sane table size fixes it. Those
+// errors were also what made the curve drawn in the app look notched.
+//
+// pow() on a 16 MHz AVR takes a couple of hundred microseconds. Three per
+// 5 ms tick is low single-digit percent of the loop, and it is exact.
+static const uint8_t DEADZONE_MAX = 30;
 
 // ---------------------------------------------------------------- state
 
@@ -109,10 +114,12 @@ struct Store {
   Cal      axis[NUM_AXES];
   uint8_t  enabled[NUM_AXES];
   int8_t   linearity[NUM_AXES];
+  uint8_t  deadzone[NUM_AXES];   // percent of travel ignored above rest
+  uint8_t  smoothing[NUM_AXES];  // noise filter on / off
 };
 
 static Store    store;
-static uint16_t curveLut[NUM_AXES][CURVE_POINTS];
+static float    gammaFor[NUM_AXES];
 static int32_t  emaAcc[NUM_AXES];
 static uint16_t settled[NUM_AXES];
 static bool     streaming = true;
@@ -137,11 +144,7 @@ static uint8_t  frameCount = 0;
 // ------------------------------------------------------------- helpers
 
 static void buildCurve(uint8_t i) {
-  float gamma = pow(2.0f, store.linearity[i] / 50.0f);
-  for (uint8_t p = 0; p < CURVE_POINTS; p++) {
-    float x = (float)p / (float)(CURVE_POINTS - 1);
-    curveLut[i][p] = (uint16_t)(ADC_MAX * pow(x, gamma) + 0.5f);
-  }
+  gammaFor[i] = pow(2.0f, store.linearity[i] / 50.0f);
 }
 
 static void buildAllCurves() {
@@ -155,6 +158,8 @@ static void useDefaults() {
     store.axis[i].hi = ADC_MAX;
     store.enabled[i] = 1;
     store.linearity[i] = 0;
+    store.deadzone[i] = 0;
+    store.smoothing[i] = 1;
   }
 }
 
@@ -167,6 +172,8 @@ static void loadFromEeprom() {
     }
     if (store.enabled[i] > 1) sane = false;
     if (store.linearity[i] < -100 || store.linearity[i] > 100) sane = false;
+    if (store.deadzone[i] > DEADZONE_MAX) sane = false;
+    if (store.smoothing[i] > 1) sane = false;
   }
   if (!sane) useDefaults();   // first boot, or corrupted contents
   buildAllCurves();
@@ -191,6 +198,12 @@ static uint16_t readAxis(uint8_t i) {
   for (uint8_t s = 0; s < OVERSAMPLE; s++) total += analogRead(PEDAL_PIN[i]);
   uint16_t sample = total / OVERSAMPLE;
 
+  if (!store.smoothing[i]) {      // filtering switched off for this pedal
+    settled[i] = sample;
+    emaAcc[i] = (int32_t)sample << EMA_SHIFT;
+    return sample;
+  }
+
   int32_t delta = (int32_t)sample - (int32_t)settled[i];
   if (delta > FAST_JUMP || delta < -(int32_t)FAST_JUMP) {
     // Real movement. Drop the filter entirely so there is no lag where it
@@ -208,24 +221,38 @@ static uint16_t readAxis(uint8_t i) {
 }
 
 // Calibration, then curve. Same arithmetic as the app's pedal_output().
+// Rounded, not truncated, and mirrored exactly by apply_calibration() in the
+// app. Truncating here cost a single count, which the steep part of an
+// extreme curve then multiplied into sixteen.
 static uint16_t applyCal(uint16_t raw, const Cal &c) {
-  if (raw <= c.lo) return 0;
+  if (c.hi <= c.lo || raw <= c.lo) return 0;
   if (raw >= c.hi) return ADC_MAX;
-  return (uint32_t)(raw - c.lo) * ADC_MAX / (c.hi - c.lo);
+  uint16_t span = c.hi - c.lo;
+  return (uint16_t)(((uint32_t)(raw - c.lo) * ADC_MAX + span / 2) / span);
+}
+
+static uint16_t applyDeadzone(uint16_t value, uint8_t i) {
+  uint8_t dz = store.deadzone[i];
+  if (dz == 0) return value;
+  // Rescale what's left, or a 5% deadzone would also cost 5% off the top and
+  // the pedal would never reach 100%.
+  uint16_t threshold = (uint16_t)(((uint32_t)dz * ADC_MAX) / 100);
+  if (value <= threshold) return 0;
+  uint16_t span = ADC_MAX - threshold;
+  return (uint16_t)(((uint32_t)(value - threshold) * ADC_MAX + span / 2)
+                    / span);
 }
 
 static uint16_t applyCurve(uint16_t value, uint8_t i) {
   if (store.linearity[i] == 0) return value;
-  uint8_t index = value >> CURVE_SHIFT;
-  if (index >= CURVE_POINTS - 1) return curveLut[i][CURVE_POINTS - 1];
-  uint16_t frac = value & ((1 << CURVE_SHIFT) - 1);
-  uint16_t low = curveLut[i][index];
-  uint16_t high = curveLut[i][index + 1];
-  return low + (uint16_t)(((uint32_t)(high - low) * frac) >> CURVE_SHIFT);
+  float shaped = pow((float)value / (float)ADC_MAX, gammaFor[i]);
+  return (uint16_t)(ADC_MAX * shaped + 0.5f);
 }
 
+// Calibrate, then deadzone, then shape - the same order as the app's
+// pedal_output().
 static uint16_t pedalOutput(uint16_t raw, uint8_t i) {
-  return applyCurve(applyCal(raw, store.axis[i]), i);
+  return applyCurve(applyDeadzone(applyCal(raw, store.axis[i]), i), i);
 }
 
 // ---------------------------------------------------------- reporting
@@ -251,6 +278,22 @@ static void sendLinearity() {
   Serial.print(F("L"));
   for (uint8_t i = 0; i < NUM_AXES; i++) {
     Serial.print(' '); Serial.print(store.linearity[i]);
+  }
+  Serial.println();
+}
+
+static void sendDeadzone() {
+  Serial.print(F("Z"));
+  for (uint8_t i = 0; i < NUM_AXES; i++) {
+    Serial.print(' '); Serial.print(store.deadzone[i]);
+  }
+  Serial.println();
+}
+
+static void sendSmoothing() {
+  Serial.print(F("M"));
+  for (uint8_t i = 0; i < NUM_AXES; i++) {
+    Serial.print(' '); Serial.print(store.smoothing[i] ? 1 : 0);
   }
   Serial.println();
 }
@@ -297,9 +340,14 @@ static void handleCommand(char *line) {
 #endif
     return;
   }
-  if (!strcmp(line, "GET")) { sendCal(); sendEnabled(); sendLinearity(); return; }
+  if (!strcmp(line, "GET")) {
+    sendCal(); sendEnabled(); sendLinearity(); sendDeadzone(); sendSmoothing();
+    return;
+  }
   if (!strcmp(line, "LOAD")) {
-    loadFromEeprom(); sendCal(); sendEnabled(); sendLinearity(); return;
+    loadFromEeprom();
+    sendCal(); sendEnabled(); sendLinearity(); sendDeadzone(); sendSmoothing();
+    return;
   }
   if (!strcmp(line, "SAVE")) { saveToEeprom(); Serial.println(F("OK")); return; }
 
@@ -334,6 +382,42 @@ static void handleCommand(char *line) {
     if (lin < -100 || lin > 100) { Serial.println(F("ERR range")); return; }
     store.linearity[axis] = (int8_t)lin;
     buildCurve((uint8_t)axis);
+    Serial.println(F("OK"));
+    return;
+  }
+
+  if (!strncmp(line, "DZ ", 3)) {
+    char *tok = strtok(line + 3, " ");
+    long axis = tok ? atol(tok) : -1;
+    tok = strtok(NULL, " ");
+    long dz = tok ? atol(tok) : -1;
+    if (axis < 0 || axis >= NUM_AXES || tok == NULL) {
+      Serial.println(F("ERR axis")); return;
+    }
+    if (dz < 0 || dz > DEADZONE_MAX) { Serial.println(F("ERR range")); return; }
+    store.deadzone[axis] = (uint8_t)dz;
+    Serial.println(F("OK"));
+    return;
+  }
+
+  if (!strncmp(line, "SM ", 3)) {
+    char *tok = strtok(line + 3, " ");
+    long axis = tok ? atol(tok) : -1;
+    tok = strtok(NULL, " ");
+    if (axis < 0 || axis >= NUM_AXES || tok == NULL) {
+      Serial.println(F("ERR axis")); return;
+    }
+    store.smoothing[axis] = (tok[0] != '0') ? 1 : 0;
+    Serial.println(F("OK"));
+    return;
+  }
+
+  if (!strncmp(line, "RATE ", 5)) {
+    long hz = atol(line + 5);
+    if (hz < 1 || hz > 200) { Serial.println(F("ERR range")); return; }
+    // The loop ticks every HID_MS, so the stream is every Nth tick.
+    uint16_t ticks = (uint16_t)((1000 / HID_MS) / hz);
+    framesPerStream = (uint8_t)(ticks < 1 ? 1 : (ticks > 255 ? 255 : ticks));
     Serial.println(F("OK"));
     return;
   }
@@ -411,7 +495,7 @@ void loop() {
   joystick.sendState();
 #endif
 
-  if (++frameCount >= FRAMES_PER_STREAM) {
+  if (++frameCount >= framesPerStream) {
     frameCount = 0;
     streamFrame(raw);
   }

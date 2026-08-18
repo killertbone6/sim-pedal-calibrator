@@ -26,7 +26,10 @@ class FakeSerial:
         self._cal = [(120, 880), (200, 950), (100, 800)]
         self._enabled = [True] * P.NUM_AXES
         self._linearity = [0] * P.NUM_AXES
+        self._deadzone = [0] * P.NUM_AXES
+        self._smoothing = [True] * P.NUM_AXES
         self._streaming = True
+        self._stream_hz = _STREAM_HZ
         self._next_frame = time.monotonic()
         self._t0 = time.monotonic()
 
@@ -45,7 +48,7 @@ class FakeSerial:
                 return self._outbox.popleft()
             now = time.monotonic()
             if self._streaming and now >= self._next_frame:
-                self._next_frame = now + 1.0 / _STREAM_HZ
+                self._next_frame = now + 1.0 / self._stream_hz
                 return self._frame()
             time.sleep(0.002)
         return b""
@@ -86,6 +89,12 @@ class FakeSerial:
     def _linearity_line(self) -> str:
         return "L " + " ".join(str(v) for v in self._linearity)
 
+    def _deadzone_line(self) -> str:
+        return "Z " + " ".join(str(v) for v in self._deadzone)
+
+    def _smoothing_line(self) -> str:
+        return "M " + " ".join("1" if v else "0" for v in self._smoothing)
+
     def _handle(self, line: str) -> None:
         if not line:
             return
@@ -98,6 +107,8 @@ class FakeSerial:
             self._emit(self._cal_line())
             self._emit(self._enabled_line())
             self._emit(self._linearity_line())
+            self._emit(self._deadzone_line())
+            self._emit(self._smoothing_line())
         elif cmd == "SET" and len(parts) == 4:
             try:
                 axis, lo, hi = int(parts[1]), int(parts[2]), int(parts[3])
@@ -134,6 +145,41 @@ class FakeSerial:
                 return
             self._linearity[axis] = linearity
             self._emit("OK")
+        elif cmd == "DZ" and len(parts) == 3:
+            try:
+                axis, value = int(parts[1]), int(parts[2])
+            except ValueError:
+                self._emit("ERR bad_number")
+                return
+            if not 0 <= axis < P.NUM_AXES:
+                self._emit("ERR axis")
+            elif not 0 <= value <= P.DEADZONE_MAX:
+                self._emit("ERR range")
+            else:
+                self._deadzone[axis] = value
+                self._emit("OK")
+        elif cmd == "SM" and len(parts) == 3:
+            try:
+                axis = int(parts[1])
+            except ValueError:
+                self._emit("ERR bad_number")
+                return
+            if not 0 <= axis < P.NUM_AXES:
+                self._emit("ERR axis")
+            else:
+                self._smoothing[axis] = parts[2] != "0"
+                self._emit("OK")
+        elif cmd == "RATE" and len(parts) == 2:
+            try:
+                hz = int(parts[1])
+            except ValueError:
+                self._emit("ERR bad_number")
+                return
+            if not 1 <= hz <= 200:
+                self._emit("ERR range")
+            else:
+                self._stream_hz = float(hz)
+                self._emit("OK")
         elif cmd == "SAVE":
             self._emit("OK")
         elif cmd == "STREAM" and len(parts) == 2:
