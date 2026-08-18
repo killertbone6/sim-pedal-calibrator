@@ -1,5 +1,5 @@
 @echo off
-title Sim Pedal Calibrator
+title Lord3D Pedal Calibrator
 cd /d "%~dp0"
 
 py --version >nul 2>nul

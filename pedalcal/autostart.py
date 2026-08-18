@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-APP_NAME = "SimPedalCalibrator"
+APP_NAME = "Lord3DPedalCalibrator"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 

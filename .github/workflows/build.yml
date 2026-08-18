@@ -39,18 +39,18 @@ jobs:
       # to bundle here.
       # pystray picks its backend at import time, so PyInstaller's static
       # analysis never sees the Windows one - it has to be named explicitly.
-      - name: Build PedalCalibrator.exe
+      - name: Build Lord3DPedalCalibrator.exe
         run: >
           pyinstaller --onefile --windowed
-          --name PedalCalibrator
+          --name Lord3DPedalCalibrator
           --icon docs/icon.ico
           --hidden-import pystray._win32
           run_app.py
 
       - uses: actions/upload-artifact@v5
         with:
-          name: PedalCalibrator-windows
-          path: dist/PedalCalibrator.exe
+          name: Lord3DPedalCalibrator-windows
+          path: dist/Lord3DPedalCalibrator.exe
 
       # On a version tag, publish a release with the .exe attached so people
       # can download and run it without installing anything.
@@ -58,5 +58,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/PedalCalibrator.exe
+          files: dist/Lord3DPedalCalibrator.exe
           generate_release_notes: true

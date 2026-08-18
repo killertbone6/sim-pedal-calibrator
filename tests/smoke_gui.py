@@ -107,17 +107,24 @@ def check_main_flow(tmp: Path) -> None:
         panel._set_max()
         check(panel.hi == before, "allowed full to be set below rest")
 
-    def raw_and_smoothing():
+    def units_and_smoothing():
+        """The readout swaps between percentage and raw, it doesn't show both."""
         panel = app.panels[0]
-        panel.raw_toggle.toggle()
-        check(app.cfg.show_raw[0] is True, "raw toggle not stored")
-        check(panel.raw_label.cget("text").strip() != "",
-              "raw value not shown when enabled")
-        panel.raw_toggle.toggle()
-        check(panel.raw_label.cget("text").strip() == "",
-              "raw value still shown when disabled")
+        percent = panel.pct_label.cget("text")
+        check("%" in percent, f"expected a percentage, got {percent!r}")
+        panel._toggle_units()
+        raw = panel.pct_label.cget("text")
+        check("%" not in raw and raw.strip().isdigit(),
+              f"expected a raw number, got {raw!r}")
+        check(app.cfg.show_raw[0] is True, "units choice not stored")
+        check(panel.units_btn.text == "RAW",
+              f"units button not updated: {panel.units_btn.text!r}")
+        panel._toggle_units()
+        check("%" in panel.pct_label.cget("text"), "did not switch back")
         panel.smooth_toggle.toggle()
         check(app.cfg.smoothing[0] is False, "smoothing toggle not stored")
+        check(panel.smooth_toggle.text == "SMOOTHING",
+              f"toggle label is {panel.smooth_toggle.text!r}")
         panel.smooth_toggle.toggle()
 
     def deadzone():
@@ -258,6 +265,7 @@ def check_main_flow(tmp: Path) -> None:
         check(app.panels[0].limits_pct() == (0, 100), "reset kept calibration")
         check(all(p.linearity == 0 for p in app.panels), "reset kept a curve")
         check(all(p.deadzone == 0 for p in app.panels), "reset kept a deadzone")
+        check(all(not p.show_raw for p in app.panels), "reset kept raw units")
         check(not app.cfg.console_open, "reset left the console open")
         shoot(root, "v2_after_reset")
 

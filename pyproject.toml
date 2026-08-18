@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sim-pedal-calibrator"
-version = "0.1.0"
-description = "Detect a sim racing pedal controller on a COM port and set per-axis min/max calibration"
+name = "lord3d-pedal-calibrator"
+version = "0.4.0"
+description = "Lord3D pedal calibrator: travel, response curve and deadzone for sim racing pedals"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

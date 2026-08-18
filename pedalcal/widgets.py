@@ -13,6 +13,13 @@ from tkinter import font as tkfont
 
 from .theme import Palette, mix
 
+try:  # Pillow gives us antialiasing, which a Tk canvas simply doesn't have.
+    from PIL import Image, ImageDraw, ImageTk
+
+    _PIL = True
+except Exception:  # noqa: BLE001 - drawing falls back to plain canvas lines
+    _PIL = False
+
 UI_FAMILIES = ["Segoe UI", "Inter", "Roboto", "DejaVu Sans", "Helvetica", "Arial"]
 MONO_FAMILIES = ["Cascadia Mono", "Consolas", "JetBrains Mono", "Menlo",
                  "DejaVu Sans Mono", "Courier New"]
@@ -864,7 +871,18 @@ class Slider(tk.Canvas, Themed):
 
 
 class CurveGraph(tk.Canvas, Themed):
-    """Input against output, with the live pedal position marked on it."""
+    """Input against output, with the live pedal position marked on it.
+
+    Tk draws lines with no antialiasing whatsoever, so a diagonal comes out as
+    a visible staircase - the look of a graphing calculator. Where Pillow is
+    available the curve is instead rendered into an image at several times the
+    final size and scaled down, which is a cheap and very effective way to get
+    smooth edges. It's only redrawn when the curve or the widget size changes;
+    the live position marker stays as canvas items on top, so the per-frame
+    cost is unchanged.
+    """
+
+    SUPERSAMPLE = 4
 
     def __init__(self, master, palette: Palette, height: int = 132) -> None:
         super().__init__(master, height=height, highlightthickness=0, bd=0,
@@ -872,64 +890,129 @@ class CurveGraph(tk.Canvas, Themed):
         self.p = palette
         self.points: list[tuple[float, float]] = [(0.0, 0.0), (1.0, 1.0)]
         self.position: float | None = None
-        self.bind("<Configure>", lambda _e: self.redraw())
+        self._photo = None          # a reference has to outlive the call
+        self._image_id = None
+        self._signature = None      # what the current image was drawn for
+        self.bind("<Configure>", lambda _e: self.redraw(force=True))
 
     def set_curve(self, points: list[tuple[float, float]]) -> None:
         """Points are (input, output) pairs, both 0.0-1.0."""
         self.points = points
-        self.redraw()
+        self.redraw(force=True)
 
     def set_position(self, position: float | None) -> None:
         self.position = position
         self.redraw()
 
-    def redraw(self) -> None:
-        self.delete("all")
-        p = self.p
-        self.configure(bg=p.surface)
+    # -- geometry --------------------------------------------------------
+
+    def _plot_area(self, w: int, h: int) -> tuple[float, float, float, float]:
+        pad = 8
+        return pad, pad, w - pad, h - pad
+
+    def redraw(self, force: bool = False) -> None:
         w = self.winfo_width()
         h = int(self["height"])
         if w <= 1:
             return
+        self.configure(bg=self.p.surface)
 
-        pad = 8
-        x0, y0, x1, y1 = pad, pad, w - pad, h - pad
+        signature = (w, h, self.p.accent, self.p.surface_alt, tuple(self.points))
+        if force or signature != self._signature:
+            self._signature = signature
+            self._render_background(w, h)
 
-        def px(value: float) -> float:
-            return x0 + (x1 - x0) * value
+        self.delete("overlay")
+        if self.position is None:
+            return
 
-        def py(value: float) -> float:
-            return y1 - (y1 - y0) * value
+        x0, y0, x1, y1 = self._plot_area(w, h)
+        value_in = max(0.0, min(1.0, self.position))
+        value_out = self._output_at(value_in)
+        px = x0 + (x1 - x0) * value_in
+        py = y1 - (y1 - y0) * value_out
+        guide = mix(self.p.accent, self.p.surface_alt, 0.5)
+        self.create_line(px, y1 - 2, px, py, fill=guide, tags="overlay")
+        self.create_line(x0 + 2, py, px, py, fill=guide, tags="overlay")
+        self.create_oval(px - 4, py - 4, px + 4, py + 4, width=0,
+                         fill=mix(self.p.accent, "#ffffff", 0.5), tags="overlay")
 
-        round_rect(self, x0, y0, x1, y1, 8, fill=p.surface_alt,
-                   outline=mix(p.surface_alt, p.border, 0.8), width=1)
+    # -- the curve itself -------------------------------------------------
+
+    def _render_background(self, w: int, h: int) -> None:
+        if _PIL:
+            try:
+                self._render_with_pillow(w, h)
+                return
+            except Exception:  # noqa: BLE001 - fall back rather than fail
+                pass
+        self._render_with_canvas(w, h)
+
+    def _render_with_pillow(self, w: int, h: int) -> None:
+        p = self.p
+        scale = self.SUPERSAMPLE
+        image = Image.new("RGB", (w * scale, h * scale), p.surface)
+        draw = ImageDraw.Draw(image)
+        x0, y0, x1, y1 = (v * scale for v in self._plot_area(w, h))
+
+        radius = 8 * scale
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=radius,
+                               fill=p.surface_alt,
+                               outline=mix(p.surface_alt, p.border, 0.8),
+                               width=scale)
 
         grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
         for i in range(1, 4):
-            self.create_line(px(i / 4), y0 + 2, px(i / 4), y1 - 2, fill=grid)
-            self.create_line(x0 + 2, py(i / 4), x1 - 2, py(i / 4), fill=grid)
+            gx = x0 + (x1 - x0) * i / 4
+            gy = y1 - (y1 - y0) * i / 4
+            draw.line([gx, y0 + 2 * scale, gx, y1 - 2 * scale], fill=grid,
+                      width=scale)
+            draw.line([x0 + 2 * scale, gy, x1 - 2 * scale, gy], fill=grid,
+                      width=scale)
 
-        # Straight line for reference, so any curve reads as a departure from it
-        self.create_line(px(0), py(0), px(1), py(1), fill=grid, dash=(3, 3))
+        # the straight line, so any curve reads as a departure from it
+        for i in range(0, 40, 2):
+            a, b = i / 40, min(1.0, (i + 1) / 40)
+            draw.line([x0 + (x1 - x0) * a, y1 - (y1 - y0) * a,
+                       x0 + (x1 - x0) * b, y1 - (y1 - y0) * b],
+                      fill=grid, width=scale)
 
+        flat = [(x0 + (x1 - x0) * vx, y1 - (y1 - y0) * vy)
+                for vx, vy in self.points]
+        if len(flat) >= 2:
+            draw.line(flat, fill=p.accent, width=2 * scale, joint="curve")
+
+        image = image.resize((w, h), Image.LANCZOS)
+        self._photo = ImageTk.PhotoImage(image)
+        if self._image_id is None:
+            self._image_id = self.create_image(0, 0, anchor="nw",
+                                               image=self._photo)
+        else:
+            self.itemconfig(self._image_id, image=self._photo)
+        self.tag_lower(self._image_id)
+
+    def _render_with_canvas(self, w: int, h: int) -> None:
+        self.delete("bg")
+        p = self.p
+        x0, y0, x1, y1 = self._plot_area(w, h)
+        round_rect(self, x0, y0, x1, y1, 8, fill=p.surface_alt,
+                   outline=mix(p.surface_alt, p.border, 0.8), width=1,
+                   tags="bg")
+        grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
+        for i in range(1, 4):
+            self.create_line(x0 + (x1 - x0) * i / 4, y0 + 2,
+                             x0 + (x1 - x0) * i / 4, y1 - 2, fill=grid,
+                             tags="bg")
+            self.create_line(x0 + 2, y1 - (y1 - y0) * i / 4, x1 - 2,
+                             y1 - (y1 - y0) * i / 4, fill=grid, tags="bg")
+        self.create_line(x0, y1, x1, y0, fill=grid, dash=(3, 3), tags="bg")
         flat = []
-        for value_in, value_out in self.points:
-            flat.extend((px(value_in), py(value_out)))
+        for vx, vy in self.points:
+            flat.extend((x0 + (x1 - x0) * vx, y1 - (y1 - y0) * vy))
         if len(flat) >= 4:
-            self.create_line(*flat, fill=p.accent, width=2, smooth=False,
-                             capstyle="round")
-
-        if self.position is not None:
-            value_in = max(0.0, min(1.0, self.position))
-            value_out = self._output_at(value_in)
-            self.create_line(px(value_in), y1 - 2, px(value_in), py(value_out),
-                             fill=mix(p.accent, p.surface_alt, 0.5))
-            self.create_line(x0 + 2, py(value_out), px(value_in), py(value_out),
-                             fill=mix(p.accent, p.surface_alt, 0.5))
-            dot = mix(p.accent, "#ffffff", 0.5)
-            self.create_oval(px(value_in) - 4, py(value_out) - 4,
-                             px(value_in) + 4, py(value_out) + 4,
-                             fill=dot, width=0)
+            self.create_line(*flat, fill=p.accent, width=2, capstyle="round",
+                             tags="bg")
+        self.tag_lower("bg")
 
     def _output_at(self, value_in: float) -> float:
         """Linear search is fine - the curve is a couple of dozen points."""
@@ -946,4 +1029,4 @@ class CurveGraph(tk.Canvas, Themed):
 
     def apply_theme(self, palette: Palette) -> None:
         self.p = palette
-        self.redraw()
+        self.redraw(force=True)

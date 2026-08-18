@@ -1,4 +1,4 @@
-# Serial protocol
+# Serial protocol — Lord3D pedal firmware
 
 Plain ASCII, one message per line, terminated with `\n`, at **115200 baud**.
 

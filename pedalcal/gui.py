@@ -22,6 +22,9 @@ from .icon_data import ICON_PNG_B64
 
 #: Errors and connection attempts are appended here, so a crash in the packaged
 #: .exe (which has no console to print to) still leaves something to read.
+#: The pedals this app is built for.
+BRAND = "Lord3D"
+
 LOG_FILE = Path.home() / "pedalcal.log"
 
 #: Refresh rates offered in Settings. The board streams at the same rate, so
@@ -75,17 +78,21 @@ class AxisPanel(W.Card):
         self.title.pack(side="left")
         self._reg(self.title, bg="surface", fg="text_dim")
 
+        # One readout, not two. The button swaps it between the calibrated
+        # percentage a game would see and the raw sensor number.
         self.pct_label = tk.Label(header, text="0.0%", font=W.mono(19, "bold"),
                                   width=7, anchor="e", bg=palette.surface,
-                                  fg=palette.accent)
+                                  fg=palette.accent, cursor="hand2")
         self.pct_label.pack(side="right")
+        self.pct_label.bind("<Button-1>", lambda _e: self._toggle_units())
         self._reg(self.pct_label, bg="surface", fg="accent")
 
-        self.raw_label = tk.Label(header, text="", font=W.mono(13), width=6,
-                                  anchor="e", bg=palette.surface,
-                                  fg=palette.text_dim)
-        self.raw_label.pack(side="right", padx=(0, 12))
-        self._reg(self.raw_label, bg="surface", fg="text_dim")
+        self.units_btn = W.HudButton(header, "%", self._toggle_units, palette,
+                                     height=22, pad=9, radius=7,
+                                     fits=["raw"])
+        self.units_btn.configure(bg=palette.surface)
+        self.units_btn.pack(side="right", padx=(0, 10))
+        self.themed.append(self.units_btn)
 
         self.meter = W.Meter(body, palette)
         self.meter.grid(row=1, column=0, sticky="ew", pady=(10, 12))
@@ -103,7 +110,7 @@ class AxisPanel(W.Card):
             if label == "learn":
                 self.learn_btn = button
 
-        self.smooth_toggle = W.Toggle(controls, "smooth", True,
+        self.smooth_toggle = W.Toggle(controls, "smoothing", True,
                                       self._smoothing_changed, palette)
         self.smooth_toggle.configure(bg=palette.surface)
         self.smooth_toggle.pack(side="right")
@@ -128,28 +135,34 @@ class AxisPanel(W.Card):
         self._reg(frame, bg="surface")
         return frame
 
-    def _labelled_slider(self, parent, label: str, minimum: int, maximum: int,
-                         on_drag, on_commit, suffix: str = ""):
-        row = tk.Frame(parent, bg=self.p.surface)
-        row.pack(fill="x", pady=(10, 0))
-        self._reg(row, bg="surface")
+    def _slider_group(self, parent, label: str, minimum: int, maximum: int,
+                      on_drag, on_commit, suffix: str = "", padx=(0, 0)):
+        """Caption above, slider and value below - so two fit side by side."""
+        group = tk.Frame(parent, bg=self.p.surface)
+        group.pack(side="left", padx=padx)
+        self._reg(group, bg="surface")
 
-        caption = tk.Label(row, text=W.spaced(label), font=W.ui(8, "bold"),
-                           bg=self.p.surface, fg=self.p.text_dim)
-        caption.pack(side="left", padx=(0, 10))
+        caption = tk.Label(group, text=W.spaced(label), font=W.ui(8, "bold"),
+                           anchor="w", bg=self.p.surface, fg=self.p.text_dim)
+        caption.pack(anchor="w")
         self._reg(caption, bg="surface", fg="text_dim")
 
-        slider = W.Slider(row, self.p, minimum, maximum, 0, command=on_drag)
+        row = tk.Frame(group, bg=self.p.surface)
+        row.pack(anchor="w", pady=(4, 0))
+        self._reg(row, bg="surface")
+
+        slider = W.Slider(row, self.p, minimum, maximum, 0, command=on_drag,
+                          width=150)
         slider.on_release = on_commit
         slider.configure(bg=self.p.surface)
         slider.pack(side="left")
         self.themed.append(slider)
 
-        value = tk.Label(row, text="0" + suffix, font=W.mono(11), width=6,
+        value = tk.Label(row, text="0" + suffix, font=W.mono(11), width=5,
                          anchor="e", bg=self.p.surface, fg=self.p.text)
-        value.pack(side="left", padx=(8, 0))
+        value.pack(side="left", padx=(6, 0))
         self._reg(value, bg="surface", fg="text")
-        return row, slider, value
+        return group, slider, value
 
     def _build_advanced(self, body) -> None:
         panel = tk.Frame(body, bg=self.p.surface)
@@ -157,28 +170,27 @@ class AxisPanel(W.Card):
         self.advanced_panel = panel
         self.advanced_row = 4
 
-        row, self.curve_slider, self.curve_label = self._labelled_slider(
-            panel, "LINEARITY", -P.CURVE_MAX, P.CURVE_MAX,
+        sliders = tk.Frame(panel, bg=self.p.surface)
+        sliders.pack(fill="x", pady=(10, 0))
+        self._reg(sliders, bg="surface")
+
+        _g, self.curve_slider, self.curve_label = self._slider_group(
+            sliders, "LINEARITY", -P.CURVE_MAX, P.CURVE_MAX,
             self._curve_dragged, self._curve_committed)
-        reset = W.HudButton(row, "linear", self._reset_curve, self.p,
-                            height=28, pad=10)
+        _g, self.dz_slider, self.dz_label = self._slider_group(
+            sliders, "DEADZONE", 0, P.DEADZONE_MAX,
+            self._deadzone_dragged, self._deadzone_committed, suffix="%",
+            padx=(18, 0))
+
+        reset = W.HudButton(panel, "linear", self._reset_curve, self.p,
+                            height=26, pad=10)
         reset.configure(bg=self.p.surface)
-        reset.pack(side="right")
+        reset.pack(anchor="e", pady=(8, 0))
         self.themed.append(reset)
 
         self.graph = W.CurveGraph(panel, self.p)
-        self.graph.pack(fill="x", pady=(8, 0))
+        self.graph.pack(fill="x", pady=(6, 0))
         self.themed.append(self.graph)
-
-        _row, self.dz_slider, self.dz_label = self._labelled_slider(
-            panel, "DEADZONE", 0, P.DEADZONE_MAX,
-            self._deadzone_dragged, self._deadzone_committed, suffix="%")
-
-        self.raw_toggle = W.Toggle(panel, "show raw value", False,
-                                   self._show_raw_changed, self.p)
-        self.raw_toggle.configure(bg=self.p.surface)
-        self.raw_toggle.pack(anchor="w", pady=(12, 0))
-        self.themed.append(self.raw_toggle)
 
         hint = tk.Label(
             panel, justify="left", anchor="w", font=W.ui(8),
@@ -221,10 +233,9 @@ class AxisPanel(W.Card):
     def _deadzone_committed(self, value: int) -> None:
         self._call("deadzone_commit", self.index, int(value))
 
-    def _show_raw_changed(self, value: bool) -> None:
-        self.show_raw = value
-        self._refresh_raw_label()
-        self._call("show_raw", self.index, value)
+    def _toggle_units(self) -> None:
+        self.set_show_raw(not self.show_raw)
+        self._call("show_raw", self.index, self.show_raw)
 
     def _smoothing_changed(self, value: bool) -> None:
         self._call("smoothing", self.index, value)
@@ -234,8 +245,13 @@ class AxisPanel(W.Card):
         if handler is not None:
             handler(*args)
 
-    def _refresh_raw_label(self) -> None:
-        self.raw_label.config(text=f"{self.raw:04d}" if self.show_raw else "")
+    def _refresh_readout(self) -> None:
+        if self.show_raw:
+            self.pct_label.config(text=f"{self.raw:04d}")
+        else:
+            output = P.pedal_output(self.raw, self.lo, self.hi, self.linearity,
+                                    self.deadzone)
+            self.pct_label.config(text=f"{output * 100:.1f}%")
 
     def _refresh_curve(self) -> None:
         self.curve_label.config(
@@ -272,8 +288,8 @@ class AxisPanel(W.Card):
 
     def set_show_raw(self, value: bool) -> None:
         self.show_raw = bool(value)
-        self.raw_toggle.set(self.show_raw)
-        self._refresh_raw_label()
+        self.units_btn.set_text("raw" if self.show_raw else "%")
+        self._refresh_readout()
 
     # -- calibration ------------------------------------------------------
 
@@ -320,9 +336,8 @@ class AxisPanel(W.Card):
         self.raw = raw
         output = P.pedal_output(raw, self.lo, self.hi, self.linearity,
                                 self.deadzone)
-        self.pct_label.config(text=f"{output * 100:.1f}%")
         self.meter.set_output(output)
-        self._refresh_raw_label()
+        self._refresh_readout()
         if self.advanced.open:
             self.graph.set_position(P.scale(raw, self.lo, self.hi))
 
@@ -347,7 +362,7 @@ class CalibratorApp(tk.Frame):
         self.p = T.palette_for(self.cfg.theme, self.cfg.accent)
         super().__init__(master, bg=self.p.bg, padx=PAD, pady=PAD)
         W.init_fonts()
-        self.master.title("Sim Pedal Calibrator")
+        self.master.title(f"{BRAND} Pedal Calibrator")
         self.master.minsize(600, 640)
         self.master.configure(bg=self.p.bg)
         self.pack(fill="both", expand=True)
@@ -470,7 +485,7 @@ class CalibratorApp(tk.Frame):
         mark.pack(side="left", padx=(0, 8))
         self._reg(mark, bg="bg", fg="accent")
 
-        title = tk.Label(row, text=W.spaced("PEDAL CALIBRATOR"),
+        title = tk.Label(row, text=W.spaced(f"{BRAND.upper()} PEDALS"),
                          font=W.ui(10, "bold"), bg=self.p.bg, fg=self.p.text)
         title.pack(side="left")
         self._reg(title, bg="bg", fg="text")
@@ -616,11 +631,12 @@ class CalibratorApp(tk.Frame):
         self.hid = None
         self._set_hid_label()
 
-        # Nothing reads these yet - they're here so the layout doesn't have to
-        # be rearranged when handbrake and shifter support lands, and so a
-        # choice made now survives until then.
+        # Nothing reads this yet - it's here so the layout doesn't have to be
+        # rearranged when handbrake support lands, and so a choice made now
+        # survives until then. A shifter needs no help from this app: the
+        # Arduino sketch can present its buttons on its own.
         self.extra_selects: dict[str, W.HudSelect] = {}
-        for key, label in (("handbrake", "HANDBRAKE"), ("shifter", "SHIFTER")):
+        for key, label in (("handbrake", "HANDBRAKE"),):
             extra = tk.Frame(card.body, bg=self.p.surface)
             extra.pack(fill="x", pady=(8, 0))
             self._reg(extra, bg="surface")
@@ -639,9 +655,9 @@ class CalibratorApp(tk.Frame):
 
         pending = tk.Label(card.body, justify="left", anchor="w", font=W.ui(8),
                            bg=self.p.surface, fg=self.p.text_dim,
-                           text="handbrake and shifter aren't wired up yet - "
-                                "pick them now if you like\nand the choice "
-                                "will be waiting when they are")
+                           text="handbrake support is not implemented yet. "
+                                "pick a port now if you\nlike and the choice "
+                                "will be waiting when it is")
         pending.pack(anchor="w", pady=(10, 0))
         self._reg(pending, bg="surface", fg="text_dim")
         card.fit()
@@ -1412,7 +1428,7 @@ def _install_crash_handler(root: tk.Tk) -> None:
         try:
             root.attributes("-topmost", False)
             messagebox.showerror(
-                "Sim Pedal Calibrator",
+                f"{BRAND} Pedal Calibrator",
                 f"Something went wrong:\n\n{exc_type.__name__}: {exc}\n\n"
                 f"The details were written to:\n{LOG_FILE}",
             )

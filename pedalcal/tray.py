@@ -43,7 +43,7 @@ class Tray:
     """
 
     def __init__(self, icon_png_b64: str, on_show, on_quit,
-                 title: str = "Sim Pedal Calibrator") -> None:
+                 title: str = "Lord3D Pedal Calibrator") -> None:
         self.icon_png_b64 = icon_png_b64
         self.on_show = on_show
         self.on_quit = on_quit

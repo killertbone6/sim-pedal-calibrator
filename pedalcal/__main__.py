@@ -9,7 +9,7 @@ from .device import list_serial_ports
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="pedalcal", description="Sim racing pedal calibrator")
+        prog="pedalcal", description="Lord3D sim racing pedal calibrator")
     parser.add_argument("--port", help="connect to this port on startup "
                                        "(e.g. COM4, /dev/ttyACM0)")
     parser.add_argument("--list", action="store_true",

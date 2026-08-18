@@ -1,7 +1,8 @@
-# Sim Pedal Calibrator
+# Lord3D Pedal Calibrator
 
-A small app that finds your pedal controller on a COM port, shows what each
-pedal is actually reading, and lets you set its travel and response curve.
+The configuration app for **Lord3D** sim racing pedals. It finds the board on
+a COM port, shows what each pedal is actually reading, and lets you set its
+travel, response curve and deadzone.
 Everything is stored on the board, so once it's set up the app doesn't need to
 be running — or installed — for the pedals to work in a game.
 
@@ -13,7 +14,7 @@ and your choices are remembered.
 
 ## Download (Windows)
 
-**[Get PedalCalibrator.exe from the Releases page →](../../releases/latest)**
+**[Get Lord3DPedalCalibrator.exe from the Releases page →](../../releases/latest)**
 
 One file. Nothing to install, no Python needed. Download it, double-click it,
 done.
@@ -184,18 +185,28 @@ physically stops.
 
 ### Smoothing
 
-Each pedal has a **SMOOTH** toggle. It's on by default and filters the wander a
-cheap potentiometer produces when nothing is touching it. The filter switches
-itself off the instant the pedal genuinely moves, so it costs no
-responsiveness where you would feel it — turn it off if you have a clean
-sensor and want the rawest possible signal.
+Each pedal has a **SMOOTHING** toggle, on by default, which deals with the
+wander a cheap potentiometer produces when nothing is touching it.
+
+Most of the work is done by averaging 32 conversions per reading rather than
+by filtering over time — averaging cuts noise without the lag a time filter
+brings. That only fits inside the 5 ms tick because the sketch speeds the ADC
+clock up from the Arduino default. On top of that sits a light average whose
+weight follows how fast the pedal is moving, so a stationary pedal settles and
+a moving one passes straight through.
+
+Against ±8 counts of sensor noise it settles within 0.3%, moves in 0.2% steps
+rather than the 0.4% an earlier deadband-based version produced, reaches 88%
+of a fast press in the same 150 ms, and still follows slow modulation to
+within 0.5% — that last one matters, because a filter that looks good at rest
+can quietly refuse to track trail-braking.
 
 ### Response curves and deadzone
 
 Open **Advanced** on any pedal for a **Linearity** slider, a **Deadzone**
 slider, a live graph of the response with your current position marked on it,
-and a **Show raw value** toggle that puts the raw sensor number next to the
-percentage.
+The **%** button beside each pedal's readout swaps it between the calibrated
+percentage a game would see and the raw sensor number.
 
 - **Left of centre** — more output for the same travel. The pedal reacts sooner
   and feels sharper. Useful for a throttle with a long, lazy first half.
@@ -366,7 +377,7 @@ To build one yourself instead:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name PedalCalibrator --icon docs/icon.ico run_app.py
+pyinstaller --onefile --windowed --name Lord3DPedalCalibrator --icon docs/icon.ico run_app.py
 ```
 
 ## Running the tests
