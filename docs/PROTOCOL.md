@@ -28,7 +28,7 @@ Raw values are 10-bit, so `0`–`1023`.
 
 | Message | Meaning |
 |---|---|
-| `PEDALCAL 4` | Identity banner, protocol version 4 |
+| `PEDALCAL 5` | Identity banner, protocol version 5 |
 | `D <raw0> <raw1> <raw2>` | Live raw readings, sent ~50×/second |
 | `C <min0> <max0> <min1> <max1> <min2> <max2>` | Current calibration |
 | `E <en0> <en1> <en2>` | Which axes are in use; a disabled axis streams a hard `0` |

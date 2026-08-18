@@ -6,11 +6,16 @@ travel, response curve and deadzone.
 Everything is stored on the board, so once it's set up the app doesn't need to
 be running — or installed — for the pedals to work in a game.
 
-![screenshot](docs/screenshot.png)
+![The calibration tab](docs/screenshot.png)
 
-Per-pedal calibration with response curves, and a settings tab for everything
-else. Dark and light themes, twelve accent colours or any colour you type in,
-and your choices are remembered.
+Stacked, or side by side with upright bars — whichever suits your screen:
+
+![Side-by-side layout](docs/screenshot-side.png)
+
+Per-pedal calibration with response curves, saved profiles, and a settings tab
+for everything else. Ten languages, a background that slides from black to
+white (or any colour you type in), twelve accent colours, and a choice of
+stacked or side-by-side pedals. Your choices are remembered.
 
 ## Download (Windows)
 
@@ -55,9 +60,11 @@ no Python at all, see [Building a Windows .exe](#building-a-windows-exe).
 | `firmware/pedal_firmware/` | Arduino sketch for the pedal controller |
 | `firmware/hid_test/` | Tiny sketch that proves the board can be a game controller |
 | `docs/PROTOCOL.md` | The serial protocol, if you want to talk to the device yourself |
-| `pedalcal/theme.py` | Palettes and colour parsing |
+| `pedalcal/theme.py` | Colour derivation and parsing |
 | `pedalcal/widgets.py` | The canvas-drawn widget kit |
-| `tests/` | Protocol and settings tests, plus a headless GUI smoke test |
+| `pedalcal/profiles.py` | Named per-pedal profiles, stored on your PC |
+| `pedalcal/i18n.py` | The translation table |
+| `tests/` | Protocol, settings and profile tests, plus a headless GUI smoke test |
 
 ## The hardware side
 
@@ -176,8 +183,12 @@ safe to test because it comes from the AVR headers rather than a library.
    it should drop to empty and fill completely as you do.
    *Or* click **LEARN**, work the pedal through its travel a couple of times,
    and click **STOP**. Each pedal learns on its own — the others are untouched.
-5. Check the readout — resting should be 0.0%, fully pressed 100.0%.
+5. Check the readout — resting should be 0%, fully pressed 100%.
 6. Click **Save** to write it to the board's EEPROM.
+
+The readout has no decimal place. A tenth of a percent is well inside the noise
+of any potentiometer, so the digit only ever flickered. Flip **Raw value** on a
+pedal card to see the sensor's own number instead.
 
 A tip on brakes: don't set Full at the absolute hardest you can press. Set it
 where you want 100% braking to happen, which is usually a bit before the pedal
@@ -186,7 +197,9 @@ physically stops.
 ### Smoothing
 
 Each pedal has a **SMOOTHING** toggle, on by default, which deals with the
-wander a cheap potentiometer produces when nothing is touching it.
+wander a cheap potentiometer produces when nothing is touching it. The `?` next
+to it says what it costs: smoothing reduces jitter but makes pedals less
+accurate.
 
 Most of the work is done by averaging 32 conversions per reading rather than
 by filtering over time — averaging cuts noise without the lag a time filter
@@ -243,29 +256,89 @@ Everything that isn't calibration lives on the **Settings** tab:
   support lands and so a choice made now is waiting for it.
 - **Pedals connected** — switch off anything you haven't wired. Disabled pedals
   vanish from the calibration tab and read a flat zero on the board.
-- **Interface** — a **Refresh** rate (30 to 240 fps; the board is asked to
-  stream at the same rate, so a faster display really is fresher data rather
-  than the same reading redrawn), dark or light, twelve accent swatches, and a
-  **Custom** field
-  that takes a colour however you have it: `#22d3ee`, `22d3ee`, `34, 211, 238`
-  or `rgb(34, 211, 238)`. Plus **Always on top**, so the window stays visible
-  over a running game while you tune.
-- **Background** — optionally keep the app running in the notification area
-  when you close the window, start it minimised, and start it with Windows. All
-  three are off by default, and none of them are needed to play: once
-  calibrated the board works on its own.
-- **Reset everything** — calibration, curves, pedal selection and appearance
-  back to defaults, after a confirmation. Writes to the connected board too.
+- **Language** — ten languages, asked once on first run and changeable here
+  afterwards. See [Languages](#languages).
+- **Interface** — **Layout** (stacked, or side by side with upright bars), the
+  **Brightness** slider and colour field described below, twelve accent
+  swatches with a **Custom** field, a **Refresh** rate (30 to 240 fps; the
+  board is asked to stream at the same rate, so a faster display really is
+  fresher data rather than the same reading redrawn), and **Always on top** so
+  the window stays visible over a running game while you tune.
+- **Running in the background** — optionally keep the app in the notification
+  area when you close the window, start it minimised, and start it with
+  Windows. All three are off by default, and none of them are needed to play:
+  once calibrated the board works on its own.
+- **Reset everything** — calibration, curves, profiles, pedal selection and
+  appearance back to defaults, after a confirmation. Writes to the connected
+  board too.
 
 The **Console** strip at the bottom of the window expands to show the running
 log of what the device is saying; leave it collapsed for a cleaner window. All
 of this is remembered in `.pedalcal.json` in your user folder.
 
+![The settings tab](docs/screenshot-settings.png)
+
+## Profiles
+
+Each pedal has its own set of named profiles, saved on your PC. A profile is
+that pedal's whole feel: where its travel starts and ends, its response curve,
+its deadzone, and whether filtering is on.
+
+**Save** overwrites the one you have selected, **Save as** makes a new one,
+**Delete** removes it, and **Reset** puts that pedal back to defaults without
+touching the others or the profiles you've saved. Picking one from the dropdown
+loads it and sends it to the board immediately; press **Save** on the
+calibration page to make it the one the board keeps when the app is closed.
+
+They live on the PC rather than on the board because the board stores exactly
+one configuration — the one it uses on its own — so there is nowhere on it to
+put a second. And they're per pedal because a brake profile means nothing
+applied to a throttle.
+
+Profiles are stored in `.pedalcal-profiles.json` in your user folder. Copy that
+file to move your setups to another machine.
+
+## Colours
+
+There is one background colour, and every other colour in the app is worked out
+from it. The **Brightness** slider runs from black to white; the **Colour**
+field next to it takes any colour code — `#101418`, `101418`, `16, 20, 24` or
+`rgb(16, 20, 24)` — and **Slider** hands control back to the slider. The accent
+works the same way: twelve swatches, or type your own.
+
+Deriving the rest is what makes an arbitrary background work. Text, the accent
+and the status colours are each fitted to a contrast target against the surface
+they will actually be drawn on, rather than being picked once for "dark" and
+once for "light", so the awkward middle of the slider stays readable instead of
+falling apart. Body text clears the WCAG AA ratio of 4.5:1 at every slider
+position and with every accent — which is as good as it can get, because
+against a mid-grey background *no* colour beats 4.58:1.
+
+The slider itself is not linear. Perceived brightness isn't proportional to the
+byte value, so a linear ramp spends most of its travel in shades nobody would
+choose and crams every usable dark shade into the first centimetre.
+
 Every visual element is drawn on a canvas rather than using stock Tk widgets,
-so it looks identical on Windows, macOS and Linux. To add colours of your own,
-edit `DARK`, `LIGHT` or the `ACCENTS` list in `pedalcal/theme.py` — a palette is
-just a dataclass of hex strings, and bright accents are darkened automatically
-on the light theme so they stay readable.
+so it looks identical on Windows, macOS and Linux. To add accents of your own,
+edit the `ACCENTS` list in `pedalcal/theme.py`.
+
+## Languages
+
+English, German, French, Spanish, Brazilian Portuguese, Italian, Polish, Dutch,
+Russian and Japanese. The app asks once, on the very first run, and never
+again — the answer is recorded even if you dismiss the prompt, because a
+question that reappears every launch is worse than a wrong default. Change it
+any time under **Settings → Language**.
+
+The **console keeps its English wording on purpose**. It exists for reporting
+faults, and a log that has been translated is much harder to search for or to
+paste into an issue.
+
+Translations live in one table in `pedalcal/i18n.py` with a column per
+language, so a missing string is a test failure rather than a stray English
+word in the middle of a German sentence. They were not written by native
+speakers — corrections are very welcome, and a pull request touching one column
+of that table is all it takes.
 
 ## Troubleshooting
 
@@ -384,8 +457,19 @@ pyinstaller --onefile --windowed --name Lord3DPedalCalibrator --icon docs/icon.i
 
 ```bash
 pip install pytest
-python -m pytest tests -q    # protocol and settings tests
+python -m pytest tests -q    # protocol, settings, colour and profile tests
 python tests/smoke_gui.py    # drives the real GUI against a fake board
+```
+
+The smoke test opens the actual window, drives it against a fake board and
+checks what came out: that learning one pedal leaves the other two alone, that
+the calibration page can be scrolled to the bottom of an open Advanced panel,
+that profiles survive a round trip through the disk, that switching language or
+layout rebuilds the window without dropping the connection, and that the window
+survives being squeezed. On a headless machine run it under Xvfb:
+
+```bash
+xvfb-run -a python tests/smoke_gui.py
 ```
 
 ## License

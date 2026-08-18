@@ -441,10 +441,21 @@ class Toggle(tk.Canvas, Themed):
     TRACK_W = 38
 
     def __init__(self, master, text: str, value: bool, command, palette: Palette,
-                 width: int | None = None, height: int = 26) -> None:
-        label = spaced(text.upper())
+                 width: int | None = None, height: int = 26,
+                 fits: list[str] | None = None, spacing: str = " ") -> None:
+        # Letter-spacing is what makes these read as instrumentation, but it
+        # costs about half as much width again. Side by side, a card is a
+        # third of the window and the tracking is what pushes the help dot off
+        # the edge, so those toggles set it to nothing.
+        self.spacing = spacing
         if width is None:
-            width = self.TRACK_W + 18 + tkfont.Font(font=ui(8, "bold")).measure(label)
+            font = tkfont.Font(font=ui(8, "bold"))
+            # `fits` reserves room for every caption this toggle will show, so
+            # a label that changes with the state doesn't shove its neighbours
+            # sideways when it does.
+            labels = [text] + list(fits or [])
+            width = self.TRACK_W + 18 + max(
+                font.measure(spaced(t.upper(), spacing)) for t in labels)
         super().__init__(master, width=width, height=height,
                          highlightthickness=0, bd=0, bg=palette.surface)
         self.p = palette
@@ -471,6 +482,12 @@ class Toggle(tk.Canvas, Themed):
         self.value = value
         self.redraw()
 
+    def set_text(self, text: str) -> None:
+        """Relabel without rebuilding - used where the caption names the state
+        rather than the control, e.g. the percent / raw readout switch."""
+        self.text = text.upper()
+        self.redraw()
+
     def redraw(self) -> None:
         self.delete("all")
         p = self.p
@@ -487,7 +504,8 @@ class Toggle(tk.Canvas, Themed):
         self.create_oval(knob_x, y0 + 4, knob_x + knob_r, y0 + 4 + knob_r,
                          fill=p.on_accent if self.value else p.text_dim, width=0)
         self.create_text(track_w + 14, h / 2 + 1, anchor="w",
-                         text=spaced(self.text), font=ui(8, "bold"),
+                         text=spaced(self.text, self.spacing),
+                         font=ui(8, "bold"),
                          fill=p.text if self.value else p.text_dim)
 
     def apply_theme(self, palette: Palette) -> None:
@@ -621,7 +639,16 @@ class ScrollArea(tk.Canvas, Themed):
         return False
 
     def _wheel(self, event) -> None:
-        if not self.winfo_ismapped() or not self._pointer_inside(event):
+        # bind_all attaches to Tk's global "all" tag, not to this widget, so
+        # the binding outlives the widget. Rebuilding the page (a language or
+        # layout change does exactly that) would otherwise leave the old area's
+        # handler firing against a destroyed canvas on the next scroll.
+        try:
+            if not self.winfo_exists() or not self.winfo_ismapped():
+                return
+        except tk.TclError:
+            return
+        if not self._pointer_inside(event):
             return
         if self._content_h() <= self.winfo_height():
             return
@@ -1030,3 +1057,279 @@ class CurveGraph(tk.Canvas, Themed):
     def apply_theme(self, palette: Palette) -> None:
         self.p = palette
         self.redraw(force=True)
+
+
+class Tooltip:
+    """A small floating panel of explanatory text.
+
+    A borderless Toplevel rather than anything drawn in the window, so it can
+    overhang the edge of a narrow window - which is exactly where a help
+    bubble is needed most. It is forced above the app because the main window
+    can be set always-on-top, and a tip that appears behind it is worse than
+    no tip at all.
+    """
+
+    WRAP = 260
+
+    def __init__(self, owner: tk.Widget, text: str, palette: Palette) -> None:
+        self.owner = owner
+        self.text = text
+        self.p = palette
+        self._window: tk.Toplevel | None = None
+
+    def show(self) -> None:
+        if self._window is not None or not self.text:
+            return
+        try:
+            top = tk.Toplevel(self.owner)
+            top.wm_overrideredirect(True)
+            top.configure(bg=self.p.border)
+            try:
+                top.wm_attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            label = tk.Label(top, text=self.text, justify="left",
+                             wraplength=self.WRAP, font=ui(9),
+                             bg=self.p.surface_alt, fg=self.p.text,
+                             padx=10, pady=7)
+            label.pack(padx=1, pady=1)
+            top.update_idletasks()
+            x = self.owner.winfo_rootx() + self.owner.winfo_width() + 8
+            y = self.owner.winfo_rooty() - 4
+            # Keep it on the screen when the app is near the right edge.
+            if x + top.winfo_width() > top.winfo_screenwidth():
+                x = max(0, self.owner.winfo_rootx() - top.winfo_width() - 8)
+            top.wm_geometry(f"+{int(x)}+{int(y)}")
+            self._window = top
+        except tk.TclError:
+            self._window = None
+
+    def hide(self) -> None:
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except tk.TclError:
+                pass
+            self._window = None
+
+
+class HelpDot(tk.Canvas, Themed):
+    """A small circled question mark that explains its neighbour on hover."""
+
+    SIZE = 17
+
+    def __init__(self, master, text: str, palette: Palette) -> None:
+        super().__init__(master, width=self.SIZE, height=self.SIZE,
+                         highlightthickness=0, bd=0, bg=palette.surface)
+        self.p = palette
+        self.text = text
+        self._hover = False
+        self._tip = Tooltip(self, text, palette)
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        # Hovering is a mouse idea; a tap has to work too.
+        self.bind("<Button-1>", self._enter)
+        self.bind("<Destroy>", lambda _e: self._tip.hide())
+        self.configure(cursor="hand2")
+        self.redraw()
+
+    def set_text(self, text: str) -> None:
+        self.text = text
+        self._tip.hide()
+        self._tip = Tooltip(self, text, self.p)
+
+    def _enter(self, _event=None) -> None:
+        self._hover = True
+        self.redraw()
+        self._tip.show()
+
+    def _leave(self, _event=None) -> None:
+        self._hover = False
+        self.redraw()
+        self._tip.hide()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        s = self.SIZE
+        colour = p.accent if self._hover else p.text_dim
+        self.create_oval(1, 1, s - 1, s - 1, outline=colour, width=1)
+        self.create_text(s / 2, s / 2 + 1, text="?", font=ui(8, "bold"),
+                         fill=colour)
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self._tip = Tooltip(self, self.text, palette)
+        self.redraw()
+
+
+class VMeter(tk.Canvas, Themed):
+    """The pedal bar stood on end, for the side-by-side layout.
+
+    Same reading as `Meter` - calibrated output, not raw sensor position - but
+    it fills upwards, which is the way a pedal trace is drawn everywhere else
+    and lets three pedals sit across a window without any of them getting
+    narrow enough to be hard to read.
+    """
+
+    def __init__(self, master, palette: Palette, height: int = 200,
+                 width: int = 64) -> None:
+        super().__init__(master, height=height, width=width,
+                         highlightthickness=0, bd=0, bg=palette.surface)
+        self.p = palette
+        self.output = 0.0
+        self.bind("<Configure>", lambda _e: self.redraw())
+
+    def set_output(self, fraction: float) -> None:
+        self.output = max(0.0, min(1.0, fraction))
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        self.configure(bg=p.surface)
+        w = self.winfo_width() or int(self["width"])
+        h = self.winfo_height() or int(self["height"])
+        if w <= 1 or h <= 1:
+            return
+
+        round_rect(self, 2, 2, w - 2, h - 2, 7, fill=p.surface_alt,
+                   outline=mix(p.surface_alt, p.border, 0.8), width=1)
+
+        span = h - 8
+        top = h - 4 - span * self.output
+
+        grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
+        for i in range(1, 10):
+            y = h - 4 - span * i / 10
+            self.create_line(6, y, w - 6, y, fill=grid)
+
+        if self.output > 0.001:
+            round_rect(self, 1, top - 2, w - 1, h - 1, 7,
+                       fill=mix(p.surface if p.dark else p.surface_alt,
+                                p.accent, 0.35), width=0)
+            round_rect(self, 4, top, w - 4, h - 4, 5, fill=p.accent, width=0)
+            self.create_line(3, top, w - 3, top,
+                             fill=mix(p.accent, "#ffffff", 0.7), width=2)
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.redraw()
+
+
+# --------------------------------------------------------------------------
+# Dialogs
+# --------------------------------------------------------------------------
+
+
+class Modal(tk.Toplevel):
+    """A themed replacement for tkinter's stock dialogs.
+
+    `simpledialog` and friends draw with plain Tk widgets, which is exactly
+    the grey-bevelled look the rest of this app exists to avoid; a naming
+    prompt that looks like it came from a different decade undoes the whole
+    window. This is the same idea - modal, centred on the parent, returns a
+    value - built out of the widgets already here.
+    """
+
+    def __init__(self, master, palette: Palette, title: str,
+                 width: int = 380) -> None:
+        super().__init__(master, bg=palette.bg)
+        self.p = palette
+        self.result = None
+        self.title(title)
+        self.resizable(False, False)
+        self.configure(padx=18, pady=16)
+        self.transient(master.winfo_toplevel())
+        # An always-on-top parent would otherwise sit in front of its own
+        # dialog, which looks precisely like the app has frozen.
+        try:
+            self.wm_attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.bind("<Escape>", lambda _e: self.cancel())
+        self.body = tk.Frame(self, bg=palette.bg, width=width)
+        self.body.pack(fill="both", expand=True)
+
+    def heading(self, text: str, dim: bool = False) -> tk.Label:
+        label = tk.Label(self.body, text=text, justify="left", anchor="w",
+                         font=ui(9) if dim else ui(11, "bold"),
+                         bg=self.p.bg,
+                         fg=self.p.text_dim if dim else self.p.text,
+                         wraplength=320)
+        label.pack(anchor="w", pady=(0, 10 if dim else 6))
+        return label
+
+    def cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+    def finish(self, value) -> None:
+        self.result = value
+        self.destroy()
+
+    def run(self):
+        """Show the dialog and block until it closes, then return its result."""
+        self.update_idletasks()
+        parent = self.master.winfo_toplevel()
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        y = parent.winfo_rooty() + 90
+        self.wm_geometry(f"+{max(0, x)}+{max(0, y)}")
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass
+        self.wait_window(self)
+        return self.result
+
+
+def ask_text(master, palette: Palette, title: str, prompt: str,
+             initial: str = "", ok_label: str = "Save",
+             cancel_label: str = "Cancel") -> str | None:
+    """Prompt for a line of text. Returns None if the user backs out."""
+    dialog = Modal(master, palette, title)
+    dialog.heading(prompt)
+
+    variable = tk.StringVar(value=initial)
+    entry = HudEntry(dialog.body, variable, palette, width=320, height=34)
+    entry.entry.configure(font=ui(11), width=28, justify="left")
+    entry.pack(anchor="w", pady=(2, 14))
+
+    row = tk.Frame(dialog.body, bg=palette.bg)
+    row.pack(anchor="e")
+
+    def accept() -> None:
+        dialog.finish(variable.get().strip())
+
+    cancel = HudButton(row, cancel_label, dialog.cancel, palette, height=32)
+    cancel.pack(side="right", padx=(8, 0))
+    ok = HudButton(row, ok_label, accept, palette, variant="primary",
+                   height=32)
+    ok.pack(side="right")
+
+    entry.entry.bind("<Return>", lambda _e: accept())
+    entry.entry.focus_set()
+    entry.entry.select_range(0, "end")
+    return dialog.run()
+
+
+def ask_choice(master, palette: Palette, title: str, prompt: str,
+               options: list[str], note: str = "") -> int | None:
+    """Pick one of a list. Used for the first-run language question."""
+    dialog = Modal(master, palette, title)
+    dialog.heading(prompt)
+    if note:
+        dialog.heading(note, dim=True)
+
+    grid = tk.Frame(dialog.body, bg=palette.bg)
+    grid.pack(fill="x")
+    columns = 2
+    for column in range(columns):
+        grid.columnconfigure(column, weight=1, uniform="choice")
+    for i, option in enumerate(options):
+        button = HudButton(grid, option, lambda i=i: dialog.finish(i), palette,
+                           height=34, pad=10)
+        button.grid(row=i // columns, column=i % columns, sticky="ew",
+                    padx=3, pady=3)
+    return dialog.run()

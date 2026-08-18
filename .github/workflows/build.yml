@@ -23,6 +23,20 @@ jobs:
       # sys.path and "import pedalcal" resolves.
       - run: python -m pytest tests -q
 
+      # The GUI test opens the real window, so it needs Tk and a display.
+      # Xvfb is a display server with no screen attached; without it Tk exits
+      # with "no display name and no $DISPLAY environment variable" and the
+      # whole window layer would go untested. python3-tk is here for the Tcl
+      # and Tk shared libraries it pulls in - the Python installed by
+      # setup-python has _tkinter built in, but it loads libtk at run time.
+      - name: Install a display and the Tk libraries
+        run: sudo apt-get update -qq && sudo apt-get install -y xvfb python3-tk
+
+      - run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
+
+      - name: Smoke-test the window
+        run: xvfb-run -a python tests/smoke_gui.py
+
   windows-exe:
     runs-on: windows-latest
     needs: test
