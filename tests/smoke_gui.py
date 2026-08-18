@@ -3,13 +3,16 @@
     xvfb-run -a python3 tests/smoke_gui.py      (or just run it on a desktop)
 
 Exits non-zero if anything misbehaves. Screenshots land in /tmp when the
-`import` tool from ImageMagick is available.
+`import` tool from ImageMagick is installed, and are quietly skipped when it
+isn't - they are a debugging aid, not an assertion.
 """
 
+import shutil
 import subprocess
 import sys
 import tempfile
 import tkinter as tk
+import traceback
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -29,16 +32,38 @@ from pedalcal.device import PedalDevice, PortInfo  # noqa: E402
 FAKE_PORT = "COM_FAKE"
 FAILURES = []
 
+#: How long the main flow is allowed to take before it is declared stuck. The
+#: whole run is about fifteen seconds; a minute is generous even on a loaded
+#: CI runner.
+WATCHDOG_MS = 60_000
+
 
 def check(condition: bool, message: str) -> None:
     if not condition:
         FAILURES.append(message)
 
 
+#: ImageMagick's screenshot tool, or None where it isn't installed - which is
+#: the normal case on a CI runner. Looked up once rather than per call.
+IMPORT_TOOL = shutil.which("import")
+
+
 def shoot(root, name: str) -> None:
+    """Save a screenshot if we can, and never fail the run if we can't.
+
+    `check=False` covers the tool exiting non-zero. It does not cover the tool
+    being absent: Popen raises FileNotFoundError before the process is ever
+    started, which is a different failure and needs catching separately.
+    """
     root.update_idletasks()
     root.update()
-    subprocess.run(["import", "-window", "root", f"/tmp/{name}.png"], check=False)
+    if IMPORT_TOOL is None:
+        return
+    try:
+        subprocess.run([IMPORT_TOOL, "-window", "root", f"/tmp/{name}.png"],
+                       check=False, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def use_fake_board() -> None:
@@ -58,6 +83,33 @@ def isolate_settings(tmp: Path, answered: bool = True) -> None:
         settings = S.load()
         settings.language_chosen = True
         S.save(settings)
+
+
+def watch(root, app, label: str, limit_ms: int = 30_000):
+    """Stop a secondary flow that has got stuck, so it reports rather than hangs."""
+
+    def expire():
+        FAILURES.append(f"{label} timed out - the window never closed")
+        try:
+            app.quit_app()
+        except Exception:
+            root.destroy()
+
+    root.after(limit_ms, expire)
+
+
+def close_later(root, app, delay_ms: int) -> None:
+    """Schedule the window to close, and close it even if the close path
+    itself throws - otherwise a failure in teardown hangs the run."""
+
+    def go():
+        try:
+            app._on_close()
+        except Exception:
+            FAILURES.append("closing the window raised:\n" + traceback.format_exc())
+            root.destroy()
+
+    root.after(delay_ms, go)
 
 
 class Wheel:
@@ -532,11 +584,30 @@ def check_main_flow(tmp: Path) -> None:
         (delay, step), rest = remaining[0], remaining[1:]
 
         def go():
-            step()
+            # A step that raises is a failure, not a reason to stop. Letting
+            # the exception escape leaves the chain unscheduled, so `finish`
+            # never runs, the window never closes and mainloop never returns -
+            # the run hangs until the CI job is killed instead of reporting
+            # what went wrong. It cost a six-hour build minute budget once.
+            try:
+                step()
+            except Exception:
+                FAILURES.append(f"{step.__name__} raised:\n"
+                                + traceback.format_exc())
             root.after(1, lambda: next_step(rest))
 
         root.after(delay, go)
 
+    def watchdog():
+        """Last resort. Nothing here should take this long; if it has, the
+        run is stuck and a stuck test that reports nothing is the worst kind."""
+        FAILURES.append("smoke test timed out - the window never closed")
+        try:
+            app.quit_app()
+        except Exception:
+            root.destroy()
+
+    root.after(WATCHDOG_MS, watchdog)
     next_step(steps)
     root.mainloop()
 
@@ -559,14 +630,16 @@ def check_first_run_language_prompt(tmp: Path) -> None:
         app = gui.CalibratorApp(root)
         root.after(1500, lambda: check(
             app.cfg.language == "nl", f"prompt answer ignored: {app.cfg.language}"))
-        root.after(1600, app._on_close)
+        watch(root, app, "first-run language prompt")
+        close_later(root, app, 1600)
         root.mainloop()
         check(len(asked) == 1, f"language asked {len(asked)} times on first run")
         check(S.load().language_chosen, "answer not recorded")
 
         root = tk.Tk()
         app = gui.CalibratorApp(root)
-        root.after(1200, app._on_close)
+        watch(root, app, "second launch after the language prompt")
+        close_later(root, app, 1200)
         root.mainloop()
         check(len(asked) == 1, "language asked again on the second launch")
         check(app.cfg.language == "nl", "chosen language not remembered")
@@ -589,7 +662,8 @@ def check_dismissing_the_prompt_still_counts(tmp: Path) -> None:
         # Close through the app, not root.destroy(): destroying the window out
         # from under a pending timer is exactly the "invalid command name"
         # crash the cancellable scheduler exists to prevent.
-        root.after(1500, app._on_close)
+        watch(root, app, "dismissed language prompt")
+        close_later(root, app, 1500)
         root.mainloop()
         check(S.load().language_chosen,
               "dismissing the language prompt means being asked forever")
@@ -605,7 +679,8 @@ def check_port_is_remembered(tmp: Path) -> None:
 
     root = tk.Tk()
     app = gui.CalibratorApp(root, initial_port=FAKE_PORT)
-    root.after(1800, app._on_close)
+    watch(root, app, "first launch on the remembered port")
+    close_later(root, app, 1800)
     root.mainloop()
     check(S.load().last_port == FAKE_PORT, "port was not saved on connect")
 
@@ -615,7 +690,8 @@ def check_port_is_remembered(tmp: Path) -> None:
         app.identified, "did not reconnect to the remembered port"))
     root.after(2100, lambda: check(
         app._selected_port() == FAKE_PORT, "remembered port not preselected"))
-    root.after(2400, app._on_close)
+    watch(root, app, "reconnect to the remembered port")
+    close_later(root, app, 2400)
     root.mainloop()
 
 
@@ -629,7 +705,8 @@ def check_bad_port(tmp: Path) -> None:
 
     root = tk.Tk()
     app = gui.CalibratorApp(root, initial_port="COM_NOPE")
-    root.after(3000, app._on_close)
+    watch(root, app, "bad port")
+    close_later(root, app, 3000)
     root.mainloop()
 
     check(bool(shown), "bad port produced no error dialog")
@@ -639,12 +716,19 @@ def check_bad_port(tmp: Path) -> None:
 
 
 def main() -> int:
+    flows = (check_main_flow, check_first_run_language_prompt,
+             check_dismissing_the_prompt_still_counts,
+             check_port_is_remembered, check_bad_port)
+    if IMPORT_TOOL is None:
+        print("note: ImageMagick's `import` is not installed, "
+              "so no screenshots will be saved")
     with tempfile.TemporaryDirectory() as tmp:
-        check_main_flow(Path(tmp))
-        check_first_run_language_prompt(Path(tmp))
-        check_dismissing_the_prompt_still_counts(Path(tmp))
-        check_port_is_remembered(Path(tmp))
-        check_bad_port(Path(tmp))
+        for flow in flows:
+            try:
+                flow(Path(tmp))
+            except Exception:
+                FAILURES.append(f"{flow.__name__} raised:\n"
+                                + traceback.format_exc())
     for problem in FAILURES:
         print("FAIL:", problem)
     print("smoke test:", "FAILED" if FAILURES else "OK")

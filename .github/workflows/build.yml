@@ -13,6 +13,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A GUI test that gets stuck waits forever by nature - there is no output
+    # to time out on. GitHub's default would let that run for six hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -34,7 +37,10 @@ jobs:
 
       - run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
+      # The test screenshots itself where ImageMagick is available and skips
+      # that quietly where it isn't, so nothing else is needed here.
       - name: Smoke-test the window
+        timeout-minutes: 5
         run: xvfb-run -a python tests/smoke_gui.py
 
   windows-exe:
