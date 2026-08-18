@@ -33,40 +33,37 @@
 static const uint8_t PEDAL_PIN[NUM_AXES] = { A0, A1, A2 };
 
 // --- game controller output -------------------------------------------
-// Switches itself on when both conditions hold:
 //
-//   * the board has native USB (Leonardo, Micro, Pro Micro, Teensy). USBCON is
-//     defined by the core for exactly those chips; an Uno or Nano uses a
-//     separate USB-serial chip and physically cannot present as an HID device.
+// The include below must stay plainly visible to the preprocessor. It is
+// tempting to wrap it in __has_include(<Joystick.h>) so the sketch still
+// builds without the library - but that quietly breaks everything, because
+// of how the Arduino build finds libraries:
 //
-//   * the right Joystick library is installed. Two different libraries are
-//     called "Joystick" - the HID one by Matthew Heironimus that this sketch
-//     needs, and an unrelated analog-thumbstick reader by Giuseppe Martini
-//     which is the one the Library Manager index lists under that name. Both
-//     provide <Joystick.h>, so testing for that header alone proves nothing.
-//     Only Heironimus's ships DynamicHID, so that is what we look for - and
-//     we never include the wrong header, which would fail to compile with a
-//     confusing error about Joystick_ not existing.
+//   it preprocesses the sketch, notes which headers can't be resolved, adds
+//   the libraries that provide them to the include path, and repeats.
 //
-// Define PEDALCAL_NO_JOYSTICK above this line to force controller output off.
+// On that first pass the Joystick library is not on the include path yet, so
+// __has_include reports false, so the #include is skipped, so nothing is
+// missing, so the library is never added - and the test stays false forever.
+// The sketch then compiles and uploads perfectly happily with no controller
+// output at all, which is a miserable thing to debug.
+//
+// USBCON is safe to test here: it comes from <avr/io.h> by way of Arduino.h
+// (it's a register on USB-capable chips), so it resolves correctly on the
+// first pass, with or without any library installed. It also has to gate the
+// include, because Joystick.h itself #errors on a board without native USB.
+//
+// Define PEDALCAL_NO_JOYSTICK to force controller output off - useful on a
+// 32u4 board if you would rather not install the library at all.
 
-#if !defined(PEDALCAL_NO_JOYSTICK) && defined(USBCON)
-  #if !defined(__has_include)
-    #include <Joystick.h>          // ancient toolchain: hope for the best
+#if defined(USBCON) && !defined(PEDALCAL_NO_JOYSTICK)
+  #include <Joystick.h>
+
+  #if defined(JOYSTICK_DEFAULT_REPORT_ID)
     #define USE_JOYSTICK 1
-  #elif __has_include(<Joystick.h>) && __has_include(<DynamicHID/DynamicHID.h>)
-    #include <Joystick.h>
-    #define USE_JOYSTICK 1
-  #elif __has_include(<Joystick.h>)
-    #warning "The installed Joystick library is the wrong one - no game controller output. Remove the Joystick library by Giuseppe Martini and install ArduinoJoystickLibrary by Matthew Heironimus: https://github.com/MHeironimus/ArduinoJoystickLibrary"
   #else
-    #warning "No Joystick library found - no game controller output. Install ArduinoJoystickLibrary by Matthew Heironimus: https://github.com/MHeironimus/ArduinoJoystickLibrary"
+    #warning "Joystick.h is not ArduinoJoystickLibrary, so there is no game controller output. Remove the library named Joystick by Giuseppe Martini and install the one by Matthew Heironimus: https://github.com/MHeironimus/ArduinoJoystickLibrary"
   #endif
-#endif
-
-#if defined(USE_JOYSTICK) && !defined(JOYSTICK_DEFAULT_REPORT_ID)
-  // Belt and braces: the header came from somewhere unexpected.
-  #error "Joystick.h does not look like ArduinoJoystickLibrary. Remove any other library named Joystick."
 #endif
 
 static const uint16_t PROTOCOL_VERSION = 3;

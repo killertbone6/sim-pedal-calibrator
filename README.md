@@ -86,9 +86,13 @@ card so there's nothing confusing left on screen.
 ### Flashing the firmware
 
 1. Install the [Arduino IDE](https://www.arduino.cc/en/software).
-2. **Install the right Joystick library first** — see below. Do this before you
-   flash: the sketch checks at compile time and turns game controller output on
-   automatically when the correct library is present.
+2. **Install the right Joystick library first** — see below. On a native-USB
+   board (Pro Micro, Leonardo, Micro) this is required: the sketch includes
+   `Joystick.h` and won't compile without it. That's deliberate — a missing
+   library used to be swallowed silently, leaving you with a board that
+   calibrates but no game can see. If you're on such a board and genuinely
+   don't want controller output, add `#define PEDALCAL_NO_JOYSTICK` at the top
+   of the sketch. On an Uno or Nano the library isn't needed at all.
 3. Open `firmware/pedal_firmware/pedal_firmware.ino`.
 4. Tools → Board / Port → pick your board.
 5. Click Upload.
@@ -139,10 +143,23 @@ Near the end of the output there's a line reading
 `Using library Joystick at version 2.x.x in folder: ...` — that path is the
 definitive answer.
 
-If the wrong library is installed, compiling prints a warning naming the
-problem, and the app reports **NOT ACTIVE** once you connect — rather than
-silently handing you a board that calibrates fine but no game can see. The
-sketch still builds and works as a calibrator either way.
+What each situation produces when you compile:
+
+| Situation | What happens |
+|---|---|
+| Correct library, native-USB board | Builds; app reports ACTIVE |
+| No library, native-USB board | **Build stops:** `Joystick.h: No such file or directory` |
+| Wrong library (Giuseppe Martini's) | Builds with a warning naming the problem; app reports NOT ACTIVE |
+| Uno / Nano | Builds; no controller output is possible; app reports NOT ACTIVE |
+
+A note for anyone reading the sketch: the `#include <Joystick.h>` is
+deliberately *not* wrapped in `__has_include(<Joystick.h>)`, tempting as that
+is. The Arduino build discovers libraries by preprocessing the sketch and
+seeing which headers fail to resolve — on that first pass the library isn't on
+the include path yet, so `__has_include` reports false, the include is skipped,
+nothing is missing, and the library never gets added. The test then stays false
+forever and the sketch builds happily with no controller output. `USBCON` is
+safe to test because it comes from the AVR headers rather than a library.
 
 ## Calibrating
 
