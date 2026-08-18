@@ -27,6 +27,14 @@ class AppSettings:
     console_open: bool = False
     #: Last port that connected successfully, reselected on the next launch.
     last_port: str = ""
+    #: Keep running in the notification area when the window is closed.
+    tray: bool = False
+    #: Start hidden in the tray rather than showing the window.
+    start_minimised: bool = False
+    #: Add a per-user Run entry so the app launches at login (Windows only).
+    start_with_windows: bool = False
+    #: Response curve per pedal, -100 (twitchier) to +100 (gentler).
+    curves: list[int] = field(default_factory=lambda: [0] * P.NUM_AXES)
     #: Which pedals are physically wired up. Unused ones are hidden.
     axes: list[bool] = field(
         default_factory=lambda: [True] * P.NUM_AXES)
@@ -52,6 +60,19 @@ def load() -> AppSettings:
 
     settings.on_top = bool(data.get("on_top", settings.on_top))
     settings.last_port = str(data.get("last_port", ""))[:120]
+    settings.tray = bool(data.get("tray", settings.tray))
+    settings.start_minimised = bool(
+        data.get("start_minimised", settings.start_minimised))
+    settings.start_with_windows = bool(
+        data.get("start_with_windows", settings.start_with_windows))
+
+    curves = data.get("curves")
+    if isinstance(curves, list) and len(curves) == P.NUM_AXES:
+        try:
+            settings.curves = [max(-P.CURVE_MAX, min(P.CURVE_MAX, int(c)))
+                               for c in curves]
+        except (TypeError, ValueError):
+            settings.curves = [0] * P.NUM_AXES
     settings.console_open = bool(data.get("console_open", settings.console_open))
 
     axes = data.get("axes")
@@ -71,6 +92,10 @@ def save(settings: AppSettings) -> None:
             "on_top": settings.on_top,
             "console_open": settings.console_open,
             "last_port": settings.last_port,
+            "tray": settings.tray,
+            "start_minimised": settings.start_minimised,
+            "start_with_windows": settings.start_with_windows,
+            "curves": settings.curves,
             "axes": settings.axes,
         }, indent=2), encoding="utf-8")
     except Exception:

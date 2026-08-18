@@ -37,11 +37,14 @@ jobs:
       # --windowed : no console window behind the app
       # The window icon is embedded in the source, so there are no data files
       # to bundle here.
+      # pystray picks its backend at import time, so PyInstaller's static
+      # analysis never sees the Windows one - it has to be named explicitly.
       - name: Build PedalCalibrator.exe
         run: >
           pyinstaller --onefile --windowed
           --name PedalCalibrator
           --icon docs/icon.ico
+          --hidden-import pystray._win32
           run_app.py
 
       - uses: actions/upload-artifact@v5

@@ -65,19 +65,58 @@ def check_main_flow(tmp: Path) -> None:
 
     root.attributes = spy
     app = gui.CalibratorApp(root, initial_port=FAKE_PORT)
+    baseline: list = []
 
     def streaming():
         check(any(p.raw for p in app.panels), "no live data arrived")
         check(app.identified, "handshake never completed")
         check(topmost_calls[:1] == [True], "always-on-top not requested at startup")
-        app.toggle_learn()
+        # Snapshot before learning starts: the panel updates live while it
+        # runs, so reading it afterwards would compare a value with itself.
+        baseline[:] = [p.limits_pct() for p in app.panels]
+        app.toggle_learn(1)          # brake only
 
     def stop_learning():
-        app.toggle_learn()
-        for panel in app.panels:
-            lo, hi = panel.limits_pct()
-            check(0 <= lo < hi <= 100, f"axis {panel.index} bad range {lo}-{hi}")
-        shoot(root, "v2_calibration")
+        """Learning one pedal must leave the other two exactly as they were."""
+        before = baseline
+        app.toggle_learn(1)
+        after = [p.limits_pct() for p in app.panels]
+        lo, hi = after[1]
+        check(0 <= lo < hi <= 100, f"brake learned a bad range {lo}-{hi}")
+        check(after[1] != before[1], "learning the brake changed nothing")
+        check(after[0] == before[0] and after[2] == before[2],
+              "learning the brake disturbed the other pedals")
+        check(not app.learning, "learning state not cleared")
+
+    def curves():
+        panel = app.panels[0]
+        panel.advanced.toggle()
+        check(panel.advanced.open, "advanced section did not open")
+        panel.curve_slider.set(-40)
+        panel._curve_dragged(-40)
+        panel._curve_committed(-40)
+        check(panel.linearity == -40, f"curve not applied: {panel.linearity}")
+        check(app.cfg.curves[0] == -40, "curve not stored in settings")
+        points = panel.graph.points
+        check(len(points) > 8, "curve graph has no points")
+        check(points[0] == (0.0, 0.0), "curve does not start at zero")
+        check(abs(points[-1][1] - 1.0) < 0.02, "curve does not reach full")
+        middle = points[len(points) // 2]
+        check(middle[1] > middle[0],
+              "negative linearity should give more output at half travel")
+        shoot(root, "v3_advanced")
+
+    def tray_toggles():
+        """Tray is unavailable in this environment: the app must cope."""
+        app.tray_toggle.toggle()
+        if not gui.tray_module.available():
+            check(app.cfg.tray is False,
+                  "app claimed tray support where there is none")
+        app.autostart_toggle.toggle()
+        if not gui.autostart.supported():
+            check(app.cfg.start_with_windows is False,
+                  "app claimed a Windows startup entry on a non-Windows host")
+        shoot(root, "v3_calibration")
 
     def open_settings():
         app.tabs.select(1)
@@ -158,6 +197,7 @@ def check_main_flow(tmp: Path) -> None:
         check(app.p.accent_seed == S.DEFAULT_ACCENT, "reset kept the accent")
         check(app.p.dark, "reset kept the light theme")
         check(app.panels[0].limits_pct() == (0, 100), "reset kept calibration")
+        check(all(p.linearity == 0 for p in app.panels), "reset kept a curve")
         check(not app.cfg.console_open, "reset left the console open")
         shoot(root, "v2_after_reset")
 
@@ -168,6 +208,7 @@ def check_main_flow(tmp: Path) -> None:
     for delay, step in ((1500, streaming), (3200, stop_learning),
                         (3500, open_settings), (3800, disable_clutch),
                         (4100, confirm_hidden), (4400, refuse_last_pedal),
+                        (3300, curves), (3400, tray_toggles),
                         (4550, scrolling), (4650, controller_status),
                         (4700, custom_colour), (5100, console_open),
                         (5300, console_visible), (5600, do_reset),

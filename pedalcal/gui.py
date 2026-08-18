@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -10,8 +11,10 @@ import traceback
 from pathlib import Path
 from tkinter import messagebox
 
+from . import autostart
 from . import protocol as P
 from . import settings as S
+from . import tray as tray_module
 from . import theme as T
 from . import widgets as W
 from .device import PedalDevice, PortInfo, explain_port_error, list_serial_ports
@@ -35,58 +38,87 @@ def write_log(text: str) -> None:
 
 
 class AxisPanel(W.Card):
-    """One pedal: live output, meter, and its two calibration points.
+    """One pedal: live output, meter, calibration points and response curve.
 
     Everything the user sees and types is a percentage of the pedal's travel.
     Raw ADC counts still go over the wire because that's what the firmware
     speaks, but they never reach the screen.
     """
 
-    def __init__(self, master, index: int, name: str, on_change,
-                 palette: T.Palette) -> None:
+    CURVE_SAMPLES = 32
+
+    def __init__(self, master, index: int, name: str, palette: T.Palette,
+                 on_change, on_curve, on_curve_commit, on_learn) -> None:
         super().__init__(master, palette)
         self.index = index
         self.name = name
         self._on_change = on_change
+        self._on_curve = on_curve
+        self._on_curve_commit = on_curve_commit
+        self._on_learn = on_learn
         self.raw = 0
+        self.linearity = 0
         self.min_var = tk.StringVar(value="0")
         self.max_var = tk.StringVar(value="100")
         self.themed: list[W.Themed] = []
         self.plain: list[tuple[tk.Widget, dict]] = []
 
         body = self.body
-        body.columnconfigure(3, weight=1)
+        body.columnconfigure(0, weight=1)
 
-        self.title = tk.Label(body, text=W.spaced(name.upper()),
+        header = self._row(body, 0)
+        self.title = tk.Label(header, text=W.spaced(name.upper()),
                               font=W.ui(9, "bold"), bg=palette.surface,
                               fg=palette.text_dim)
-        self.title.grid(row=0, column=0, columnspan=3, sticky="w")
+        self.title.pack(side="left")
         self._reg(self.title, bg="surface", fg="text_dim")
 
-        self.pct_label = tk.Label(body, text="0%", font=W.mono(19, "bold"),
+        self.pct_label = tk.Label(header, text="0%", font=W.mono(19, "bold"),
                                   width=5, anchor="e", bg=palette.surface,
                                   fg=palette.accent)
-        self.pct_label.grid(row=0, column=4, sticky="e")
+        self.pct_label.pack(side="right")
         self._reg(self.pct_label, bg="surface", fg="accent")
 
         self.meter = W.Meter(body, palette)
-        self.meter.grid(row=1, column=0, columnspan=5, sticky="ew",
-                        pady=(10, 12))
+        self.meter.grid(row=1, column=0, sticky="ew", pady=(10, 12))
         self.themed.append(self.meter)
 
-        self._build_field(body, "REST", self.min_var, column=0)
-        self._build_field(body, "FULL", self.max_var, column=2, padx=(26, 0))
+        fields = self._row(body, 2)
+        self._build_field(fields, "REST", self.min_var)
+        self._build_field(fields, "FULL", self.max_var, padx=(24, 0))
+        self.learn_btn = W.HudButton(fields, "learn", self._learn, palette,
+                                     height=30, pad=12,
+                                     fits=["stop", "learn"])
+        self.learn_btn.configure(bg=palette.surface)
+        self.learn_btn.pack(side="right")
+        self.themed.append(self.learn_btn)
+
+        self.advanced = W.Disclosure(body, "advanced", False,
+                                     self._toggle_advanced, palette)
+        self.advanced.configure(bg=palette.surface)
+        self.advanced.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.themed.append(self.advanced)
+
+        self._build_advanced(body)
 
         for var in (self.min_var, self.max_var):
             var.trace_add("write", lambda *_: self.redraw_meter())
 
+    # -- construction helpers --------------------------------------------
+
     def _reg(self, widget: tk.Widget, **roles: str) -> None:
         self.plain.append((widget, roles))
 
-    def _build_field(self, body, label: str, var: tk.StringVar, column: int,
+    def _row(self, body, row: int) -> tk.Frame:
+        frame = tk.Frame(body, bg=self.p.surface)
+        frame.grid(row=row, column=0, sticky="ew")
+        self._reg(frame, bg="surface")
+        return frame
+
+    def _build_field(self, parent, label: str, var: tk.StringVar,
                      padx=(0, 0)) -> None:
-        holder = tk.Frame(body, bg=self.p.surface)
-        holder.grid(row=2, column=column, columnspan=2, sticky="w", padx=padx)
+        holder = tk.Frame(parent, bg=self.p.surface)
+        holder.pack(side="left", padx=padx)
         self._reg(holder, bg="surface")
 
         caption = tk.Label(holder, text=W.spaced(label), font=W.ui(8, "bold"),
@@ -109,6 +141,108 @@ class AxisPanel(W.Card):
         button.configure(bg=self.p.surface)
         button.pack(side="left", padx=(8, 0))
         self.themed.append(button)
+
+    def _build_advanced(self, body) -> None:
+        panel = tk.Frame(body, bg=self.p.surface)
+        self._reg(panel, bg="surface")
+        self.advanced_panel = panel
+        self.advanced_row = 4
+
+        row = tk.Frame(panel, bg=self.p.surface)
+        row.pack(fill="x", pady=(10, 6))
+        self._reg(row, bg="surface")
+
+        caption = tk.Label(row, text=W.spaced("LINEARITY"),
+                           font=W.ui(8, "bold"), bg=self.p.surface,
+                           fg=self.p.text_dim)
+        caption.pack(side="left", padx=(0, 10))
+        self._reg(caption, bg="surface", fg="text_dim")
+
+        self.curve_slider = W.Slider(
+            panel, self.p, -P.CURVE_MAX, P.CURVE_MAX, 0,
+            command=self._curve_dragged)
+        self.curve_slider.on_release = self._curve_committed
+        self.curve_slider.configure(bg=self.p.surface)
+        self.curve_slider.pack(in_=row, side="left")
+        self.themed.append(self.curve_slider)
+
+        self.curve_label = tk.Label(row, text="0", font=W.mono(11), width=5,
+                                    anchor="e", bg=self.p.surface,
+                                    fg=self.p.text)
+        self.curve_label.pack(side="left", padx=(8, 0))
+        self._reg(self.curve_label, bg="surface", fg="text")
+
+        reset = W.HudButton(row, "linear", self._reset_curve, self.p,
+                            height=28, pad=10)
+        reset.configure(bg=self.p.surface)
+        reset.pack(side="right")
+        self.themed.append(reset)
+
+        self.graph = W.CurveGraph(panel, self.p)
+        self.graph.pack(fill="x")
+        self.themed.append(self.graph)
+
+        hint = tk.Label(
+            panel, justify="left", anchor="w", font=W.ui(8),
+            bg=self.p.surface, fg=self.p.text_dim,
+            text="left of centre reacts sooner and is more sensitive; "
+                 "right of centre\nis gentler off the top and easier to "
+                 "hold part-way")
+        hint.pack(anchor="w", pady=(6, 0))
+        self._reg(hint, bg="surface", fg="text_dim")
+        self._refresh_curve()
+
+    # -- advanced section -------------------------------------------------
+
+    def _toggle_advanced(self, open_: bool) -> None:
+        if open_:
+            self.advanced_panel.grid(row=self.advanced_row, column=0,
+                                     sticky="ew")
+        else:
+            self.advanced_panel.grid_forget()
+        self.fit()
+
+    def _curve_dragged(self, value: int) -> None:
+        """Live while dragging: redraw locally, don't flood the serial link."""
+        self.linearity = int(value)
+        self._refresh_curve()
+        if self._on_curve is not None:
+            self._on_curve(self.index, self.linearity)
+
+    def _curve_committed(self, value: int) -> None:
+        if self._on_curve_commit is not None:
+            self._on_curve_commit(self.index, int(value))
+
+    def _reset_curve(self) -> None:
+        self.set_linearity(0)
+        self._curve_committed(0)
+
+    def _refresh_curve(self) -> None:
+        self.curve_label.config(text=f"{self.linearity:+d}"
+                                     if self.linearity else "0")
+        steps = self.CURVE_SAMPLES
+        self.graph.set_curve([
+            (i / steps,
+             P.apply_curve(round(i / steps * P.ADC_MAX), self.linearity)
+             / P.ADC_MAX)
+            for i in range(steps + 1)
+        ])
+
+    def set_linearity(self, value: int) -> None:
+        self.linearity = max(-P.CURVE_MAX, min(P.CURVE_MAX, int(value)))
+        self.curve_slider.set(self.linearity)
+        self._refresh_curve()
+
+    # -- learning ---------------------------------------------------------
+
+    def _learn(self) -> None:
+        if self._on_learn is not None:
+            self._on_learn(self.index)
+
+    def set_learning(self, learning: bool) -> None:
+        self.learn_btn.set_text("stop" if learning else "learn")
+        self.learn_btn.variant = "primary" if learning else "ghost"
+        self.learn_btn.redraw()
 
     # -- values ----------------------------------------------------------
 
@@ -138,8 +272,11 @@ class AxisPanel(W.Card):
     def update_raw(self, raw: int) -> None:
         self.raw = raw
         lo, hi = self.limits()
-        self.pct_label.config(text=f"{P.scale(raw, lo, hi) * 100:.0f}%")
+        output = P.pedal_output(raw, lo, hi, self.linearity)
+        self.pct_label.config(text=f"{output * 100:.0f}%")
         self.meter.set_values(raw, lo, hi)
+        if self.advanced.open:
+            self.graph.set_position(P.scale(raw, lo, hi))
 
     def redraw_meter(self) -> None:
         lo, hi = self.limits()
@@ -153,8 +290,7 @@ class AxisPanel(W.Card):
             widget.configure(**{opt: getattr(palette, attr)
                                 for opt, attr in roles.items()})
         for child in self.themed:
-            if isinstance(child, (W.HudEntry, W.HudButton)):
-                child.configure(bg=palette.surface)
+            child.configure(bg=palette.surface)
             child.apply_theme(palette)
 
 
@@ -171,7 +307,7 @@ class CalibratorApp(tk.Frame):
 
         self.device: PedalDevice | None = None
         self.ports: list[PortInfo] = []
-        self.learning = False
+        self.learning: set[int] = set()
         self.identified = False
         self._connecting = False
         self._handshakes = 0
@@ -180,6 +316,10 @@ class CalibratorApp(tk.Frame):
         self._observed: list[list[int]] = [[P.ADC_MAX, 0] for _ in P.AXIS_NAMES]
         self.themed: list[W.Themed] = []
         self.plain: list[tuple[tk.Widget, dict]] = []
+        self._tray: tray_module.Tray | None = None
+        # pystray's callbacks arrive on its own thread; Tk must only ever be
+        # touched from the main loop, so they queue up and _tick drains them.
+        self._tray_requests: queue.Queue[str] = queue.Queue()
 
         self._build_header()
         self._build_tabs()
@@ -195,6 +335,8 @@ class CalibratorApp(tk.Frame):
 
         self._apply_axis_visibility()
         self.set_on_top(self.cfg.on_top)
+        if self.cfg.tray and self._start_tray() and self.cfg.start_minimised:
+            self.master.withdraw()
         self.refresh_ports(select=initial_port or self.cfg.last_port)
         remembered = (initial_port is None and self.cfg.last_port
                       and self._selected_port() == self.cfg.last_port)
@@ -334,25 +476,24 @@ class CalibratorApp(tk.Frame):
         self.calibration_page = page
 
         self.panels = [
-            AxisPanel(page, i, name, self.apply_calibration, self.p)
+            AxisPanel(page, i, name, self.p, self.apply_calibration,
+                      self._curve_preview, self._curve_commit, self.toggle_learn)
             for i, name in enumerate(P.AXIS_NAMES)
         ]
-        for panel in self.panels:
+        for panel, linearity in zip(self.panels, self.cfg.curves):
+            panel.set_linearity(linearity)
             panel.fit()
             self.themed.append(panel)
 
         row = tk.Frame(page, bg=self.p.bg)
         row.pack(fill="x", pady=(2, 0))
         self._reg(row, bg="bg")
-        self.learn_btn = W.HudButton(row, "learn range", self.toggle_learn,
-                                     self.p, height=34)
-        self.learn_btn.pack(side="left")
-        self.themed.append(self.learn_btn)
-        for label, command in (("apply", self.apply_calibration),
-                               ("save", self.save_calibration),
-                               ("reload", self.reload_calibration)):
+        for i, (label, command) in enumerate((
+                ("apply", self.apply_calibration),
+                ("save", self.save_calibration),
+                ("reload", self.reload_calibration))):
             button = W.HudButton(row, label, command, self.p, height=34)
-            button.pack(side="left", padx=(8, 0))
+            button.pack(side="left", padx=(0 if i == 0 else 8, 0))
             self.themed.append(button)
         self.action_row = row
 
@@ -498,6 +639,40 @@ class CalibratorApp(tk.Frame):
         card.fit()
         self.appearance_card = card
 
+        # --- background ---------------------------------------------------
+        card = self._card(page, "background")
+        self.tray_toggle = W.Toggle(card.body, "keep running in the tray",
+                                    self.cfg.tray, self.set_tray, self.p)
+        self.tray_toggle.pack(anchor="w")
+        self.themed.append(self.tray_toggle)
+
+        self.minimised_toggle = W.Toggle(
+            card.body, "start minimised", self.cfg.start_minimised,
+            self.set_start_minimised, self.p)
+        self.minimised_toggle.pack(anchor="w", pady=(6, 0))
+        self.themed.append(self.minimised_toggle)
+
+        self.autostart_toggle = W.Toggle(
+            card.body, "start with windows", self.cfg.start_with_windows,
+            self.set_autostart, self.p)
+        self.autostart_toggle.pack(anchor="w", pady=(6, 0))
+        self.themed.append(self.autostart_toggle)
+
+        note = "Once calibrated the board works on its own - none of this is\n"
+        if not tray_module.available():
+            note += ("needed to play. A tray icon isn't available here: "
+                     f"{tray_module.unavailable_reason()[:44]}")
+        elif not autostart.supported():
+            note += "needed to play. Start-with-login is Windows only."
+        else:
+            note += "needed to play; it's here for convenience while tuning."
+        self.background_note = tk.Label(card.body, text=note, justify="left",
+                                        anchor="w", font=W.ui(8),
+                                        bg=self.p.surface, fg=self.p.text_dim)
+        self.background_note.pack(anchor="w", pady=(10, 0))
+        self._reg(self.background_note, bg="surface", fg="text_dim")
+        card.fit()
+
         # --- reset -------------------------------------------------------
         card = self._card(page, "reset")
         reset = W.HudButton(card.body, "reset everything", self.reset_everything,
@@ -600,6 +775,71 @@ class CalibratorApp(tk.Frame):
                 self.log(f"write failed: {exc}")
                 return
 
+    def set_tray(self, value: bool) -> None:
+        self.cfg.tray = value
+        S.save(self.cfg)
+        if value:
+            if not self._start_tray():
+                self.tray_toggle.set(False)
+                self.cfg.tray = False
+                S.save(self.cfg)
+                self._set_status("A tray icon isn't available on this system")
+                return
+            self._set_status("Closing the window will now leave it running")
+        else:
+            self._stop_tray()
+            self._set_status("Closing the window will now quit")
+
+    def set_start_minimised(self, value: bool) -> None:
+        self.cfg.start_minimised = value
+        S.save(self.cfg)
+        if value and not self.cfg.tray:
+            self._set_status("Turn on \"keep running in the tray\" as well, "
+                             "or there is nothing to minimise into")
+
+    def set_autostart(self, value: bool) -> None:
+        if not autostart.supported():
+            self.autostart_toggle.set(False)
+            self._set_status("Start-with-login is only wired up for Windows")
+            return
+        if not autostart.set_enabled(value):
+            self.autostart_toggle.set(not value)
+            self._set_status("Windows would not let us change the startup entry")
+            return
+        self.cfg.start_with_windows = value
+        S.save(self.cfg)
+        self._set_status("Will start with Windows" if value
+                         else "No longer starts with Windows")
+
+    def _start_tray(self) -> bool:
+        if self._tray is not None and self._tray.running:
+            return True
+        if not tray_module.available():
+            return False
+        self._tray = tray_module.Tray(
+            ICON_PNG_B64,
+            on_show=lambda: self._tray_requests.put("show"),
+            on_quit=lambda: self._tray_requests.put("quit"),
+        )
+        if not self._tray.start():
+            self._tray = None
+            return False
+        return True
+
+    def _stop_tray(self) -> None:
+        if self._tray is not None:
+            self._tray.stop()
+            self._tray = None
+
+    def _hide_to_tray(self) -> None:
+        self.master.withdraw()
+        self.log("hidden to the tray - the board keeps working regardless")
+
+    def _show_window(self) -> None:
+        self.master.deiconify()
+        self.master.lift()
+        self.master.focus_force()
+
     def set_on_top(self, value: bool) -> None:
         self.cfg.on_top = value
         S.save(self.cfg)
@@ -674,6 +914,7 @@ class CalibratorApp(tk.Frame):
         self.cfg = defaults
         for panel in self.panels:
             panel.set_limits(0, P.ADC_MAX)
+            panel.set_linearity(0)
         for toggle, value in zip(self.axis_toggles, defaults.axes):
             toggle.set(value)
         self.on_top_toggle.set(defaults.on_top)
@@ -847,6 +1088,7 @@ class CalibratorApp(tk.Frame):
                     f"({P.raw_to_pct(hi)}%).")
                 return
             self.device.send(P.cmd_set(panel.index, lo, hi))
+            self.device.send(P.cmd_curve(panel.index, panel.linearity))
         self._set_status("Calibration applied (not yet saved)")
 
     def save_calibration(self) -> None:
@@ -860,29 +1102,62 @@ class CalibratorApp(tk.Frame):
         if self.device is not None:
             self.device.send(P.cmd_load())
 
-    def toggle_learn(self) -> None:
-        self.learning = not self.learning
-        if self.learning:
-            self._observed = [[P.ADC_MAX, 0] for _ in P.AXIS_NAMES]
-            self.learn_btn.set_text("stop learning")
-            self.learn_btn.variant = "primary"
-            self.learn_btn.redraw()
-            self._set_status("Learning - press every pedal fully, then stop")
-        else:
-            self.learn_btn.set_text("learn range")
-            self.learn_btn.variant = "ghost"
-            self.learn_btn.redraw()
-            for panel, (lo, hi) in zip(self.panels, self._observed):
-                if hi > lo and self.cfg.axes[panel.index]:
-                    panel.set_limits(lo, hi)
-            self.apply_calibration()
-            self._set_status("Learned range applied")
+    def toggle_learn(self, index: int) -> None:
+        """Learn one pedal's travel without disturbing the others."""
+        panel = self.panels[index]
+        name = P.AXIS_NAMES[index]
+        if index in self.learning:
+            self.learning.discard(index)
+            panel.set_learning(False)
+            lo, hi = self._observed[index]
+            if hi > lo:
+                panel.set_limits(lo, hi)
+                self.apply_calibration()
+                self._set_status(f"{name}: learned {P.raw_to_pct(lo)}% - "
+                                 f"{P.raw_to_pct(hi)}%")
+            else:
+                self._set_status(f"{name}: nothing moved, range unchanged")
+            return
+
+        self.learning.add(index)
+        self._observed[index] = [P.ADC_MAX, 0]
+        panel.set_learning(True)
+        self._set_status(f"Learning {name} - press it fully, then press Stop")
+
+    # -- response curve ---------------------------------------------------
+
+    def _curve_preview(self, index: int, linearity: int) -> None:
+        """Dragging the slider: remember it, but don't spam the serial link."""
+        self.cfg.curves[index] = linearity
+
+    def _curve_commit(self, index: int, linearity: int) -> None:
+        self.cfg.curves[index] = linearity
+        S.save(self.cfg)
+        if self.device is not None:
+            try:
+                self.device.send(P.cmd_curve(index, linearity))
+            except (ValueError, Exception) as exc:  # noqa: BLE001
+                self.log(f"curve write failed: {exc}")
+                return
+        self._set_status(
+            f"{P.AXIS_NAMES[index]} curve set to {linearity:+d}"
+            if linearity else f"{P.AXIS_NAMES[index]} curve set to linear")
 
     # -- event loop ------------------------------------------------------
 
     def _tick(self) -> None:
         if not self._alive:
             return
+        while True:
+            try:
+                request = self._tray_requests.get_nowait()
+            except queue.Empty:
+                break
+            if request == "show":
+                self._show_window()
+            elif request == "quit":
+                self.quit_app()
+                return
         try:
             if self.device is not None:
                 for msg in self.device.poll():
@@ -897,7 +1172,7 @@ class CalibratorApp(tk.Frame):
                 if not self.cfg.axes[panel.index]:
                     continue
                 panel.update_raw(raw)
-                if self.learning:
+                if panel.index in self.learning:
                     seen = self._observed[panel.index]
                     seen[0] = min(seen[0], raw)
                     seen[1] = max(seen[1], raw)
@@ -920,6 +1195,11 @@ class CalibratorApp(tk.Frame):
             self.log(f"calibration from device: {msg.points}")
         elif isinstance(msg, P.Enabled):
             self.log(f"device axis state: {msg.axes}")
+        elif isinstance(msg, P.Linearity):
+            for panel, linearity in zip(self.panels, msg.axes):
+                panel.set_linearity(linearity)
+                self.cfg.curves[panel.index] = linearity
+            self.log(f"curves from device: {msg.axes}")
         elif isinstance(msg, P.Ack):
             if not msg.ok:
                 self.log(f"device error: {msg.detail}")
@@ -927,9 +1207,17 @@ class CalibratorApp(tk.Frame):
             self.log(msg.text)
 
     def _on_close(self) -> None:
+        """The window's X. With the tray on, this hides rather than quits."""
+        if self.cfg.tray and self._tray is not None and self._tray.running:
+            self._hide_to_tray()
+            return
+        self.quit_app()
+
+    def quit_app(self) -> None:
         self._alive = False
         self._cancel_pending()
         self.disconnect()
+        self._stop_tray()
         self.master.destroy()
 
 

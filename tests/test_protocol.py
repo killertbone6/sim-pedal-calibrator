@@ -132,10 +132,11 @@ def test_simulator_speaks_the_protocol():
     sim = FakeSerial()
     assert _exchange(sim, "ID?") == P.Ident(P.PROTOCOL_VERSION, True)
     assert _exchange(sim, "SET 1 111 888") == P.Ack(True)
-    cal, enabled = _replies(sim, "GET")
+    cal, enabled, curves = _replies(sim, "GET")
     assert isinstance(cal, P.Calibration)
     assert cal.points[1] == (111, 888)
     assert enabled == P.Enabled.all_on()
+    assert curves == P.Linearity.flat()
     assert _exchange(sim, "SET 1 900 100") == P.Ack(False, "range")
     assert _exchange(sim, "NONSENSE") == P.Ack(False, "unknown_command")
 
@@ -152,3 +153,47 @@ def test_simulator_streams_data_in_range():
         if frames >= 5:
             return
     raise AssertionError("simulator did not stream data")
+
+
+def test_curve_commands():
+    assert P.cmd_curve(1, -40) == "CURVE 1 -40"
+    with pytest.raises(ValueError):
+        P.cmd_curve(9, 0)
+    with pytest.raises(ValueError):
+        P.cmd_curve(0, 400)
+    assert P.parse_line("L 0 -25 60") == P.Linearity((0, -25, 60))
+
+
+def test_curve_shape():
+    """Negative is more sensitive early, positive is gentler. Ends are fixed."""
+    middle = P.ADC_MAX // 2
+    assert P.apply_curve(middle, -50) > middle    # reaches full sooner
+    assert P.apply_curve(middle, 0) == middle     # untouched when linear
+    assert P.apply_curve(middle, 50) < middle     # holds back at part travel
+    for linearity in (-100, -50, 0, 50, 100):
+        assert P.apply_curve(0, linearity) == 0
+        assert P.apply_curve(P.ADC_MAX, linearity) >= P.ADC_MAX - 4
+
+
+def test_curve_is_monotonic():
+    """However it's shaped, pressing harder must never give less output."""
+    for linearity in range(-100, 101, 20):
+        values = [P.apply_curve(v, linearity) for v in range(0, P.ADC_MAX, 3)]
+        assert all(b >= a for a, b in zip(values, values[1:])), linearity
+
+
+def test_pedal_output_chains_calibration_then_curve():
+    lo, hi = 120, 880
+    assert P.pedal_output(lo, lo, hi, 0) == 0.0
+    assert P.pedal_output(hi, lo, hi, 0) == 1.0
+    half = (lo + hi) // 2
+    assert P.pedal_output(half, lo, hi, -50) > P.pedal_output(half, lo, hi, 0)
+    assert P.pedal_output(half, lo, hi, 50) < P.pedal_output(half, lo, hi, 0)
+
+
+def test_curve_survives_the_fake_board():
+    sim = FakeSerial()
+    assert _exchange(sim, "CURVE 1 -30") == P.Ack(True)
+    assert _exchange(sim, "CURVE 1 500") == P.Ack(False, "range")
+    _cal, _enabled, curves = _replies(sim, "GET")
+    assert curves.axes[1] == -30

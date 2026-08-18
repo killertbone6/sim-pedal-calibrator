@@ -9,6 +9,8 @@ PC  ->  device
     GET                     ask for the stored calibration
     SET <axis> <min> <max>  set calibration for one axis (applied immediately)
     EN <axis> <0|1>         mark an axis as unused / in use
+    CURVE <axis> <-100..100>  response curve; 0 is linear, negative gives more
+                            output early, positive softens the first half
     SAVE                    write the current calibration to EEPROM
     LOAD                    re-read the calibration from EEPROM
     STREAM <0|1>            turn the live value stream off / on
@@ -20,6 +22,7 @@ device -> PC
     D <raw0> <raw1> <raw2>      live raw ADC values, ~50 per second
     C <min0> <max0> ... <max2>  the current calibration (reply to GET / LOAD)
     E <en0> <en1> <en2>         which axes are in use (reply to GET / LOAD)
+    L <lin0> <lin1> <lin2>      response curve per axis (reply to GET / LOAD)
     OK                          command accepted
     ERR <reason>                command rejected
 """
@@ -30,13 +33,24 @@ from dataclasses import dataclass
 
 BAUD = 115200
 FIRMWARE_ID = "PEDALCAL"
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 AXIS_NAMES = ("Throttle", "Brake", "Clutch")
 NUM_AXES = len(AXIS_NAMES)
 
 #: Arduino's analogRead() is 10-bit, so raw values run 0..1023.
 ADC_MAX = 1023
+
+#: Response curve limits. 0 is a straight line; negative gives more output for
+#: the same pedal travel (twitchier), positive gives less (gentler).
+CURVE_MAX = 100
+
+#: The curve is evaluated through a small lookup table with linear
+#: interpolation between points, because an 8-bit micro should not be running
+#: pow() a few hundred times a second. The app uses exactly the same table and
+#: the same integer arithmetic, so what you see really is what the board does.
+CURVE_POINTS = 17
+CURVE_SHIFT = 6          # ADC_MAX >> 6 == 15, giving 16 segments
 
 
 # --------------------------------------------------------------------------
@@ -99,6 +113,17 @@ class Enabled:
 
 
 @dataclass(frozen=True)
+class Linearity:
+    """The response curve of each pedal, -100 to +100. 0 is a straight line."""
+
+    axes: tuple[int, ...]
+
+    @staticmethod
+    def flat() -> "Linearity":
+        return Linearity(tuple(0 for _ in range(NUM_AXES)))
+
+
+@dataclass(frozen=True)
 class Ack:
     """``OK`` or ``ERR <reason>``."""
 
@@ -113,7 +138,7 @@ class Unknown:
     text: str
 
 
-Message = Ident | Data | Calibration | Enabled | Ack | Unknown
+Message = Ident | Data | Calibration | Enabled | Linearity | Ack | Unknown
 
 
 def parse_line(line: str) -> Message:
@@ -145,6 +170,10 @@ def parse_line(line: str) -> Message:
 
         if tag == "E" and len(parts) == NUM_AXES + 1:
             return Enabled(tuple(p != "0" for p in parts[1:]))
+
+        if tag == "L" and len(parts) == NUM_AXES + 1:
+            return Linearity(tuple(
+                max(-CURVE_MAX, min(CURVE_MAX, int(p))) for p in parts[1:]))
 
         if tag == "OK":
             return Ack(True)
@@ -188,6 +217,15 @@ def cmd_enable(axis: int, on: bool) -> str:
     return f"EN {axis} {1 if on else 0}"
 
 
+def cmd_curve(axis: int, linearity: int) -> str:
+    if not 0 <= axis < NUM_AXES:
+        raise ValueError(f"axis must be 0..{NUM_AXES - 1}, got {axis}")
+    if not -CURVE_MAX <= linearity <= CURVE_MAX:
+        raise ValueError(f"linearity must be {-CURVE_MAX}..{CURVE_MAX}, "
+                         f"got {linearity}")
+    return f"CURVE {axis} {linearity}"
+
+
 def cmd_save() -> str:
     return "SAVE"
 
@@ -225,3 +263,41 @@ def raw_to_pct(raw: int) -> int:
 def pct_to_raw(pct: float) -> int:
     """The inverse of raw_to_pct, for talking to the firmware."""
     return round(max(0.0, min(100.0, pct)) / 100 * ADC_MAX)
+
+
+def curve_gamma(linearity: int) -> float:
+    """Turn the -100..100 slider into an exponent.
+
+    +-50 lands on a half or double exponent, which is about as far as anyone
+    sensibly goes; the ends give 4.0 and 0.25 for the truly committed.
+    """
+    return 2.0 ** (max(-CURVE_MAX, min(CURVE_MAX, int(linearity))) / 50.0)
+
+
+def curve_table(linearity: int) -> list[int]:
+    """The lookup table the firmware builds when the curve changes."""
+    gamma = curve_gamma(linearity)
+    return [round(ADC_MAX * (i / (CURVE_POINTS - 1)) ** gamma)
+            for i in range(CURVE_POINTS)]
+
+
+def apply_curve(value: int, linearity: int) -> int:
+    """Shape an already-calibrated 0..ADC_MAX value. Integer maths on purpose."""
+    value = max(0, min(ADC_MAX, value))
+    if linearity == 0:
+        return value
+    table = curve_table(linearity)
+    index = value >> CURVE_SHIFT
+    if index >= CURVE_POINTS - 1:
+        return table[-1]
+    frac = value & ((1 << CURVE_SHIFT) - 1)
+    low, high = table[index], table[index + 1]
+    return low + (((high - low) * frac) >> CURVE_SHIFT)
+
+
+def pedal_output(raw: int, lo: int, hi: int, linearity: int = 0) -> float:
+    """The whole chain - calibrate, then shape - as a 0.0-1.0 fraction.
+
+    This is what the game receives, so it's also what the app should show.
+    """
+    return apply_curve(round(scale(raw, lo, hi) * ADC_MAX), linearity) / ADC_MAX

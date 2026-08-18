@@ -25,6 +25,7 @@ class FakeSerial:
         self._outbox: deque[bytes] = deque()
         self._cal = [(120, 880), (200, 950), (100, 800)]
         self._enabled = [True] * P.NUM_AXES
+        self._linearity = [0] * P.NUM_AXES
         self._streaming = True
         self._next_frame = time.monotonic()
         self._t0 = time.monotonic()
@@ -82,6 +83,9 @@ class FakeSerial:
     def _enabled_line(self) -> str:
         return "E " + " ".join("1" if e else "0" for e in self._enabled)
 
+    def _linearity_line(self) -> str:
+        return "L " + " ".join(str(v) for v in self._linearity)
+
     def _handle(self, line: str) -> None:
         if not line:
             return
@@ -93,6 +97,7 @@ class FakeSerial:
         elif cmd in ("GET", "LOAD"):
             self._emit(self._cal_line())
             self._emit(self._enabled_line())
+            self._emit(self._linearity_line())
         elif cmd == "SET" and len(parts) == 4:
             try:
                 axis, lo, hi = int(parts[1]), int(parts[2]), int(parts[3])
@@ -114,6 +119,20 @@ class FakeSerial:
                 self._emit("ERR axis")
                 return
             self._enabled[axis] = parts[2] != "0"
+            self._emit("OK")
+        elif cmd == "CURVE" and len(parts) == 3:
+            try:
+                axis, linearity = int(parts[1]), int(parts[2])
+            except ValueError:
+                self._emit("ERR bad_number")
+                return
+            if not 0 <= axis < P.NUM_AXES:
+                self._emit("ERR axis")
+                return
+            if not -P.CURVE_MAX <= linearity <= P.CURVE_MAX:
+                self._emit("ERR range")
+                return
+            self._linearity[axis] = linearity
             self._emit("OK")
         elif cmd == "SAVE":
             self._emit("OK")

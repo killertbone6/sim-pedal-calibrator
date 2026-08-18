@@ -1,13 +1,15 @@
 # Sim Pedal Calibrator
 
 A small app that finds your pedal controller on a COM port, shows what each
-pedal is actually reading, and lets you set the min and max point of each one.
-The calibration is stored on the device, so it survives unplugging.
+pedal is actually reading, and lets you set its travel and response curve.
+Everything is stored on the board, so once it's set up the app doesn't need to
+be running — or installed — for the pedals to work in a game.
 
 ![screenshot](docs/screenshot.png)
 
-Calibration and settings tabs. Dark and light themes, twelve accent colours or
-any colour you type in, and your choices are remembered.
+Per-pedal calibration with response curves, and a settings tab for everything
+else. Dark and light themes, twelve accent colours or any colour you type in,
+and your choices are remembered.
 
 ## Download (Windows)
 
@@ -168,9 +170,10 @@ safe to test because it comes from the AVR headers rather than a library.
    one described as *Arduino* or *USB Serial Device*; on Linux `/dev/ttyACM0`;
    on macOS `/dev/cu.usbmodem…`. Switch off any pedal you haven't wired.
 3. **Connect** — the dot at the top right turns green and reads LIVE.
-4. Back on **Calibration**, click **Learn range**, press every pedal all the
-   way down and let it back up a couple of times, then **Stop learning**. The
-   rest and full points fill in from what it saw.
+4. Back on **Calibration**, click **Learn** on one pedal, work it through its
+   full travel a couple of times, then click **Stop**. The rest and full points
+   fill in from what it saw. Each pedal learns on its own — the others are left
+   exactly as they were.
    *Or* set them by hand: with your foot off the pedal click **Set** under
    Rest, press it fully and click **Set** under Full.
 5. Check the readouts — resting should be 0%, fully pressed 100%.
@@ -182,6 +185,22 @@ than raw sensor counts. The app converts to whatever the hardware wants.
 A tip on brakes: don't set Full at the absolute hardest you can press. Set it
 where you want 100% braking to happen, which is usually a bit before the pedal
 physically stops.
+
+### Response curves
+
+Open **Advanced** on any pedal for a **Linearity** slider and a live graph of
+the response, with your current pedal position marked on it.
+
+- **Left of centre** — more output for the same travel. The pedal reacts sooner
+  and feels sharper. Useful for a throttle with a long, lazy first half.
+- **Centre** — a straight line, output tracks travel exactly.
+- **Right of centre** — less output early, so the first part of the travel is
+  gentler and part-throttle or trail-braking is easier to hold steady.
+
+The curve lives on the board along with the calibration, so it applies in game
+whether or not this app is running. The graph on screen is drawn with the same
+integer arithmetic the firmware uses, so it isn't an approximation of what the
+board does — it's the same calculation.
 
 ### What the meter shows
 
@@ -204,8 +223,12 @@ Everything that isn't calibration lives on the **Settings** tab:
   that takes a colour however you have it: `#22d3ee`, `22d3ee`, `34, 211, 238`
   or `rgb(34, 211, 238)`. Plus **Always on top**, so the window stays visible
   over a running game while you tune.
-- **Reset everything** — calibration, pedal selection and appearance back to
-  defaults, after a confirmation. Writes to the connected board too.
+- **Background** — optionally keep the app running in the notification area
+  when you close the window, start it minimised, and start it with Windows. All
+  three are off by default, and none of them are needed to play: once
+  calibrated the board works on its own.
+- **Reset everything** — calibration, curves, pedal selection and appearance
+  back to defaults, after a confirmation. Writes to the connected board too.
 
 The **Console** strip at the bottom of the window expands to show the running
 log of what the device is saying; leave it collapsed for a cleaner window. All
@@ -281,6 +304,20 @@ On a 32u4 board (Pro Micro, Leonardo, Micro) that's almost always one of:
    select *SparkFun Pro Micro* with the processor your board actually is —
    usually **ATmega32U4 (5V, 16 MHz)**. Picking 3.3V/8MHz on a 5V board makes
    uploads flaky in exactly this way.
+
+**The pedals only update once every second or two in game.** Fixed in firmware
+— re-flash. A serial write into a USB endpoint nobody is draining blocks for up
+to 250 ms, and a telemetry frame built from eight separate `print()` calls
+could stall the loop for two seconds, holding up the controller reports behind
+it. Telemetry is now written in one non-blocking call and skipped when there's
+no room, and the controller update happens first regardless.
+
+**The pedal reading twitches by a percent or two when your foot is off it.**
+That's a cheap potentiometer, and the firmware now filters it: oversampling, a
+moving average and a small deadband. The filter switches itself off the moment
+the pedal genuinely moves, so it costs no responsiveness where you'd feel it.
+If it still wanders, the pot is worn — a hall sensor or a load cell is the real
+fix.
 
 **A pedal moves on its own, or two pedals move together.** That's an unwired
 analog pin picking up its neighbour's signal. Switch the unused pedal off under

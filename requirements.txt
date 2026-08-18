@@ -1,1 +1,6 @@
 pyserial>=3.5
+
+# Optional: the system tray icon. The app runs fine without these,
+# it just can't minimise to the notification area.
+pystray>=0.19
+pillow>=10

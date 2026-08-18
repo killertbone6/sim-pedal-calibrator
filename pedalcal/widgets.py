@@ -760,3 +760,205 @@ class Meter(tk.Canvas, Themed):
     def apply_theme(self, palette: Palette) -> None:
         self.p = palette
         self.redraw()
+
+
+class Slider(tk.Canvas, Themed):
+    """A draggable value slider. Bipolar ranges get a centre notch."""
+
+    def __init__(self, master, palette: Palette, minimum: int = -100,
+                 maximum: int = 100, value: int = 0, command=None,
+                 width: int = 210, height: int = 26) -> None:
+        super().__init__(master, width=width, height=height,
+                         highlightthickness=0, bd=0, bg=palette.surface)
+        self.p = palette
+        self.minimum = minimum
+        self.maximum = maximum
+        self.value = value
+        self.command = command          # fired continuously while dragging
+        self.on_release = None          # fired once, when the drag finishes
+        self._hover = False
+        self._drag = False
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._move)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Configure>", lambda _e: self.redraw())
+        self.configure(cursor="hand2")
+        self.redraw()
+
+    # -- geometry --------------------------------------------------------
+
+    def _track(self) -> tuple[float, float]:
+        return 10.0, max(11.0, (self.winfo_width() or int(self["width"])) - 10.0)
+
+    def _x_of(self, value: float) -> float:
+        x0, x1 = self._track()
+        span = self.maximum - self.minimum or 1
+        return x0 + (x1 - x0) * (value - self.minimum) / span
+
+    def _value_at(self, x: float) -> int:
+        x0, x1 = self._track()
+        span = self.maximum - self.minimum
+        ratio = 0.0 if x1 == x0 else (x - x0) / (x1 - x0)
+        return int(round(self.minimum + max(0.0, min(1.0, ratio)) * span))
+
+    # -- interaction -----------------------------------------------------
+
+    def _set_hover(self, hover: bool) -> None:
+        self._hover = hover
+        self.redraw()
+
+    def _press(self, event) -> None:
+        self._drag = True
+        self._apply(self._value_at(event.x))
+
+    def _move(self, event) -> None:
+        if self._drag:
+            self._apply(self._value_at(event.x))
+
+    def _release(self, _event=None) -> None:
+        was = self._drag
+        self._drag = False
+        self.redraw()
+        if was and self.on_release is not None:
+            self.on_release(self.value)
+
+    def _apply(self, value: int) -> None:
+        value = max(self.minimum, min(self.maximum, value))
+        if value != self.value:
+            self.value = value
+            if self.command is not None:
+                self.command(value)
+        self.redraw()
+
+    def set(self, value: int, notify: bool = False) -> None:
+        self.value = max(self.minimum, min(self.maximum, int(value)))
+        self.redraw()
+        if notify and self.command is not None:
+            self.command(self.value)
+
+    def get(self) -> int:
+        return self.value
+
+    # -- painting --------------------------------------------------------
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        self.configure(bg=self.master.cget("bg"))
+        h = int(self["height"])
+        x0, x1 = self._track()
+        cy = h / 2
+
+        round_rect(self, x0, cy - 3, x1, cy + 3, 3,
+                   fill=p.surface_alt, outline=p.border, width=1)
+
+        # A bipolar slider needs a visible home position.
+        if self.minimum < 0 < self.maximum:
+            zero = self._x_of(0)
+            self.create_line(zero, cy - 8, zero, cy + 8,
+                             fill=mix(p.border, p.text_dim, 0.6))
+            start, end = sorted((zero, self._x_of(self.value)))
+            if end - start > 1:
+                round_rect(self, start, cy - 3, end, cy + 3, 3,
+                           fill=p.accent, width=0)
+        else:
+            round_rect(self, x0, cy - 3, self._x_of(self.value), cy + 3, 3,
+                       fill=p.accent, width=0)
+
+        kx = self._x_of(self.value)
+        radius = 9 if (self._hover or self._drag) else 8
+        self.create_oval(kx - radius, cy - radius, kx + radius, cy + radius,
+                         fill=p.accent if self._drag else p.text,
+                         outline=p.bg, width=2)
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.redraw()
+
+
+class CurveGraph(tk.Canvas, Themed):
+    """Input against output, with the live pedal position marked on it."""
+
+    def __init__(self, master, palette: Palette, height: int = 132) -> None:
+        super().__init__(master, height=height, highlightthickness=0, bd=0,
+                         bg=palette.surface)
+        self.p = palette
+        self.points: list[tuple[float, float]] = [(0.0, 0.0), (1.0, 1.0)]
+        self.position: float | None = None
+        self.bind("<Configure>", lambda _e: self.redraw())
+
+    def set_curve(self, points: list[tuple[float, float]]) -> None:
+        """Points are (input, output) pairs, both 0.0-1.0."""
+        self.points = points
+        self.redraw()
+
+    def set_position(self, position: float | None) -> None:
+        self.position = position
+        self.redraw()
+
+    def redraw(self) -> None:
+        self.delete("all")
+        p = self.p
+        self.configure(bg=p.surface)
+        w = self.winfo_width()
+        h = int(self["height"])
+        if w <= 1:
+            return
+
+        pad = 8
+        x0, y0, x1, y1 = pad, pad, w - pad, h - pad
+
+        def px(value: float) -> float:
+            return x0 + (x1 - x0) * value
+
+        def py(value: float) -> float:
+            return y1 - (y1 - y0) * value
+
+        round_rect(self, x0, y0, x1, y1, 8, fill=p.surface_alt,
+                   outline=mix(p.surface_alt, p.border, 0.8), width=1)
+
+        grid = mix(p.surface_alt, p.bg, 0.55 if p.dark else 0.35)
+        for i in range(1, 4):
+            self.create_line(px(i / 4), y0 + 2, px(i / 4), y1 - 2, fill=grid)
+            self.create_line(x0 + 2, py(i / 4), x1 - 2, py(i / 4), fill=grid)
+
+        # Straight line for reference, so any curve reads as a departure from it
+        self.create_line(px(0), py(0), px(1), py(1), fill=grid, dash=(3, 3))
+
+        flat = []
+        for value_in, value_out in self.points:
+            flat.extend((px(value_in), py(value_out)))
+        if len(flat) >= 4:
+            self.create_line(*flat, fill=p.accent, width=2, smooth=False,
+                             capstyle="round")
+
+        if self.position is not None:
+            value_in = max(0.0, min(1.0, self.position))
+            value_out = self._output_at(value_in)
+            self.create_line(px(value_in), y1 - 2, px(value_in), py(value_out),
+                             fill=mix(p.accent, p.surface_alt, 0.5))
+            self.create_line(x0 + 2, py(value_out), px(value_in), py(value_out),
+                             fill=mix(p.accent, p.surface_alt, 0.5))
+            dot = mix(p.accent, "#ffffff", 0.5)
+            self.create_oval(px(value_in) - 4, py(value_out) - 4,
+                             px(value_in) + 4, py(value_out) + 4,
+                             fill=dot, width=0)
+
+    def _output_at(self, value_in: float) -> float:
+        """Linear search is fine - the curve is a couple of dozen points."""
+        previous = self.points[0]
+        for point in self.points[1:]:
+            if point[0] >= value_in:
+                span = point[0] - previous[0]
+                if span <= 0:
+                    return point[1]
+                t = (value_in - previous[0]) / span
+                return previous[1] + (point[1] - previous[1]) * t
+            previous = point
+        return previous[1]
+
+    def apply_theme(self, palette: Palette) -> None:
+        self.p = palette
+        self.redraw()
